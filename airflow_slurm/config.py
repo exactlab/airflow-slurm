@@ -10,17 +10,5 @@ class Settings(BaseSettings):
     SSH_USER: str
     SSH_PASSWORD: str | None = None 
     SSH_KEY_PATH: str | None = None 
-    
-# _CONFIG = None
-
-# def load_settings() -> None:
-#     global _CONFIG
-#     _CONFIG = Settings()
-
-
-# def get_settings() -> Settings:
-#     return _CONFIG
-
-# load_settings()
 
 settings = Settings()
