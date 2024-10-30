@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "airflow-slurm"
+version = "0.1.0"
+description = "Airflow operator for slurm"
+authors = ["Andrea Recchia <andrea.recchia@exact-lab.it>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+pydantic-settings = "^2.4.0"
+apache-airflow = {extras = ["async"], version = "^2.10.2"}
+apache-airflow-providers-ssh = "^3.13.1"
+asyncssh = "^2.17.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
