@@ -61,7 +61,8 @@ class SSHSlurmTrigger(BaseTrigger):
         self.ssh_opt = asyncssh.SSHClientConnectionOptions(
             username=settings.SSH_USER,
             port=settings.SSH_PORT, 
-            client_keys=settings.SSH_KEY_PATH
+            client_keys=settings.SSH_KEY_PATH,
+            known_host=None
         )
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
