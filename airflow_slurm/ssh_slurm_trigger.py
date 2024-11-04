@@ -62,7 +62,7 @@ class SSHSlurmTrigger(BaseTrigger):
             username=settings.SSH_USER,
             port=settings.SSH_PORT, 
             client_keys=settings.SSH_KEY_PATH,
-            known_host=None
+            known_hosts=None
         )
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
