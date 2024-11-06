@@ -18,14 +18,11 @@ import asyncio
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional, List
 
+from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 from airflow.exceptions import AirflowException
 from airflow.models import Variable
 import asyncssh
-
-from airflow_slurm.config import settings
-
-# from airflow_slurm.config import get_settings
 
 # Use this to hide asyncssh connections logs
 asyncssh.set_log_level("WARN")
@@ -44,6 +41,7 @@ class SSHSlurmTrigger(BaseTrigger):
     def __init__(
         self,
         jobid: str,
+        ssh_conn_id: str,
         last_known_state: Optional[str] = None,
         last_known_log_lines: int = 0,
         tdelta_between_pokes: int = 20,
@@ -55,13 +53,13 @@ class SSHSlurmTrigger(BaseTrigger):
         :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & SACCT
         """
         super().__init__()
-        # settings = get_settings()
         self.jobid = jobid
-        self.ssh_host = settings.SSH_HOST
+        self.ssh_conn_id = ssh_conn_id
+        self.ssh_hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
         self.ssh_opt = asyncssh.SSHClientConnectionOptions(
-            username=settings.SSH_USER,
-            port=settings.SSH_PORT, 
-            client_keys=settings.SSH_KEY_PATH,
+            username=self.ssh_hook.username,
+            port=self.ssh_hook.port, 
+            client_keys=self.ssh_hook.key_file,
             known_hosts=None
         )
         self.last_known_state = last_known_state
@@ -74,6 +72,7 @@ class SSHSlurmTrigger(BaseTrigger):
             "airflow_slurm.ssh_slurm_trigger.SSHSlurmTrigger",
             {
                 "jobid": self.jobid,
+                "ssh_conn_id": self.ssh_conn_id,
                 "last_known_state": self.last_known_state,
                 "last_known_log_lines": self.last_known_log_lines,
                 "tdelta_between_pokes": self.tdelta_between_pokes,
@@ -89,7 +88,7 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a dictionary with job information or None if we haven't found the job
 
         """
-        async with asyncssh.connect(host=self.ssh_host, options=self.ssh_opt) as conn:
+        async with asyncssh.connect(host=self.ssh_hook.remote_host, options=self.ssh_opt) as conn:
             result = await conn.run(f"scontrol show job {self.jobid}")
 
         output = result.stdout
@@ -127,7 +126,7 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a list with all lines
         """
         try:
-            async with asyncssh.connect(host=self.ssh_host, options=self.ssh_opt) as conn:
+            async with asyncssh.connect(host=self.ssh_hook.remote_host, options=self.ssh_opt) as conn:
                 result = await conn.run(f"cat {self.slurm_log_path}")
             
             log = result.stdout.split("\n")

@@ -16,7 +16,7 @@ def slurm():
     slurm_task = SSHSlurmOperator(
         task_id='submit_slurm_task',
         ssh_conn_id='slurm', # Airflow connection ID (AIRFLOW_CONN_{CONN_ID})
-        command='/path/to/job.slurm',  # Example command for SLURM job
+        command='--wrap "sleep 20"',  # Example command for SLURM job
         env={'SBATCH_JOB_NAME': 'example_job_name'},
         slurm_options={
             'NODES': 1,

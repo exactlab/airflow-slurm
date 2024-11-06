@@ -169,8 +169,14 @@ class SSHSlurmOperator(BaseOperator):
         self.log.info(f"Submitted batch job {output}")
 
         # We already have the job id. We expect a status change / new lines in the log
-        self.defer(trigger=SSHSlurmTrigger(output, tdelta_between_pokes=self.tdelta_between_checks),
-                   method_name="new_slurm_state_log")
+        self.defer(
+            trigger=SSHSlurmTrigger(
+                output, 
+                ssh_conn_id=self.ssh_conn_id,
+                tdelta_between_pokes=self.tdelta_between_checks
+            ),
+            method_name="new_slurm_state_log"
+        )
 
         return output
 
@@ -235,11 +241,16 @@ class SSHSlurmOperator(BaseOperator):
                 self._log_status_change(event)
             raise AirflowException("Slurm job failed!")
         elif event["slurm_job"]["state"] in SACCT_RUNNING:
-            self.defer(trigger=SSHSlurmTrigger(event["slurm_job"]["job_id"],
-                                            last_known_state=event["slurm_job"]["state"],
-                                            last_known_log_lines=event["log_number_lines"],
-                                            tdelta_between_pokes=self.tdelta_between_checks),
-                       method_name="new_slurm_state_log")
+            self.defer(
+                trigger=SSHSlurmTrigger(
+                    event["slurm_job"]["job_id"],
+                    ssh_conn_id=self.ssh_conn_id,
+                    last_known_state=event["slurm_job"]["state"],
+                    last_known_log_lines=event["log_number_lines"],
+                    tdelta_between_pokes=self.tdelta_between_checks
+                ),
+                method_name="new_slurm_state_log"
+            )
         else:
             raise AirflowException(f"SACCT returned an unknown state for job #{event['slurm_job']['job_id']}: "
                                    f"{event['slurm_job']['state']}")
