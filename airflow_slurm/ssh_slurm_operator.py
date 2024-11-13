@@ -205,6 +205,8 @@ class SSHSlurmOperator(BaseOperator):
                 get_pty=True,
             )
         out = stdout.decode()
+        if exit_code > 0:
+            raise AirflowException(f"Command execution failed. Exit code: {exit_code}. Error output: {out}")
         self.log.info(f"{out}")
         if len(out.split()) > 0:
             raise AirflowSkipException("According to SQUEUE this job is already running for this date!")
