@@ -42,9 +42,10 @@ class SSHSlurmTrigger(BaseTrigger):
         self,
         jobid: str,
         ssh_conn_id: str,
+        slurm_log_dir: str,
         last_known_state: Optional[str] = None,
         last_known_log_lines: int = 0,
-        tdelta_between_pokes: int = 20,
+        tdelta_between_pokes: int = 20
     ):
         """
         :param jobid: the slurm's job id
@@ -55,6 +56,7 @@ class SSHSlurmTrigger(BaseTrigger):
         super().__init__()
         self.jobid = jobid
         self.ssh_conn_id = ssh_conn_id
+        self.slurm_log_dir = slurm_log_dir
         self.ssh_hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
         self.ssh_opt = asyncssh.SSHClientConnectionOptions(
             username=self.ssh_hook.username,
@@ -65,7 +67,7 @@ class SSHSlurmTrigger(BaseTrigger):
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
-        self.slurm_log_path = Path(Variable.get("SLURM_LOGS_FOLDER", default_var="/tmp")) / f"slurm-{self.jobid}.out"
+        self.slurm_log_path = Path(slurm_log_dir) / f"slurm-{self.jobid}.out"
 
     def serialize(self) -> Tuple[str, Dict[str, Any]]:
         return (
@@ -73,6 +75,7 @@ class SSHSlurmTrigger(BaseTrigger):
             {
                 "jobid": self.jobid,
                 "ssh_conn_id": self.ssh_conn_id,
+                "slurm_log_dir": self.slurm_log_dir,
                 "last_known_state": self.last_known_state,
                 "last_known_log_lines": self.last_known_log_lines,
                 "tdelta_between_pokes": self.tdelta_between_pokes,

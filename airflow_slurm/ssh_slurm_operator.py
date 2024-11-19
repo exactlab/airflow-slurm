@@ -61,6 +61,7 @@ class SSHSlurmOperator(BaseOperator):
             env: Optional[Dict[str, str]] = None,
             tdelta_between_checks: int = 5,
             slurm_options: Optional[Dict[str, Any]] = None,
+            slurm_log_dir: str | None = None,
             **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -69,6 +70,7 @@ class SSHSlurmOperator(BaseOperator):
         self.env = env
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
+        self.slurm_log_dir = slurm_log_dir or "/tmp"
 
     @cached_property
     def ssh_hook(self):
@@ -106,10 +108,7 @@ class SSHSlurmOperator(BaseOperator):
         # There must be the --parsable option: this way we can read the job id much easier
         cmd = ["sbatch", "--parsable"]
 
-        slurm_log_folder = Variable.get("SLURM_LOGS_FOLDER", default_var="/tmp")
-        if not slurm_log_folder:
-            raise AirflowException("Please set the Airflow global variable SLURM_LOGS_FOLDER")
-        cmd.append(f"--output={Path(slurm_log_folder) / 'slurm-%j.out'}")
+        cmd.append(f"--output={Path(self.slurm_log_dir) / 'slurm-%j.out'}")
 
         if self.slurm_options:
             # We have extra options, which we cannot pass to slurm via environment variables
@@ -163,6 +162,7 @@ class SSHSlurmOperator(BaseOperator):
             trigger=SSHSlurmTrigger(
                 output, 
                 ssh_conn_id=self.ssh_conn_id,
+                slurm_log_dir=self.slurm_log_dir,
                 tdelta_between_pokes=self.tdelta_between_checks
             ),
             method_name="new_slurm_state_log"
@@ -237,6 +237,7 @@ class SSHSlurmOperator(BaseOperator):
                 trigger=SSHSlurmTrigger(
                     event["slurm_job"]["job_id"],
                     ssh_conn_id=self.ssh_conn_id,
+                    slurm_log_dir=self.slurm_log_dir,
                     last_known_state=event["slurm_job"]["state"],
                     last_known_log_lines=event["log_number_lines"],
                     tdelta_between_pokes=self.tdelta_between_checks
