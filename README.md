@@ -22,7 +22,6 @@ def slurm():
             'NODES': 1,
             'NTASKS': 1
         },
-        cwd='/tmp',  # Working directory on remote server (optional)
         tdelta_between_checks=10  # Poll interval (in seconds) for job status
     )
 

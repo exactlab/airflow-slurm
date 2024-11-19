@@ -42,9 +42,6 @@ class SSHSlurmOperator(BaseOperator):
     :param slurm_options: other parameters we'll pass to SBATCH because it doesn't accept working with variables
         of environment To see the list: SLURM_OPTS dictionary of this file
     :param tdelta_between_checks: how many seconds do we check SACCT to know the status of the job?
-    :param cwd: Working directory to execute the command in.
-        If None (default), the command is run in a temporary directory.
-        This is because of the subprocess that runs SBATCH. Alternatively, the parameter slurm_options["CHDIR"] can be passed
 
     If do_xcom_push = True, the last line of the subprocess will be written to XCom
     """
@@ -62,7 +59,6 @@ class SSHSlurmOperator(BaseOperator):
             command: str,
             ssh_conn_id: str,
             env: Optional[Dict[str, str]] = None,
-            cwd: Optional[str] = None,
             tdelta_between_checks: int = 5,
             slurm_options: Optional[Dict[str, Any]] = None,
             **kwargs,
@@ -71,7 +67,6 @@ class SSHSlurmOperator(BaseOperator):
         self.command = command
         self.ssh_conn_id = ssh_conn_id
         self.env = env
-        self.cwd = cwd
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
 
@@ -136,11 +131,6 @@ class SSHSlurmOperator(BaseOperator):
         """
         The function that is executed when we call this operator
         """
-        if self.cwd is not None:
-            if not Path(self.cwd).exists():
-                raise AirflowException(f"Can not find the cwd: {self.cwd}")
-            if not Path(self.cwd).is_dir():
-                raise AirflowException(f"The cwd {self.cwd} must be a directory")
 
         env = self.get_env(context)
         self.check_job_not_running(env, context)
