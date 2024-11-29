@@ -1,17 +1,33 @@
 #########  SLURM STATES ###########
-SACCT_COMPLETED_OK = ('COMPLETED',)
-SACCT_FAILED = ('BOOT_FAIL', 'CANCELLED', 'DEADLINE', 'FAILED', 'NODE_FAIL', 'OUT_OF_MEMORY', 'REVOKED', 'TIMEOUT')
-SACCT_RUNNING = ('PENDING', 'PREEMPTED', 'RUNNING', 'REQUEUED', 'RESIZING', 'SUSPENDED')
+SACCT_COMPLETED_OK = ("COMPLETED",)
+SACCT_FAILED = (
+    "BOOT_FAIL",
+    "CANCELLED",
+    "DEADLINE",
+    "FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "REVOKED",
+    "TIMEOUT",
+)
+SACCT_RUNNING = (
+    "PENDING",
+    "PREEMPTED",
+    "RUNNING",
+    "REQUEUED",
+    "RESIZING",
+    "SUSPENDED",
+)
 SACCT_FINISHED = SACCT_COMPLETED_OK + SACCT_FAILED
 
 ######### SBATCH OPTIONS ##############
 # Dictionary: slurm option: (need user input?, slurm argument, with '=' if necessary)
 SLURM_OPTS = {
     "JOB_NAME": (True, "--job-name="),
-    "OUTPUT_FILE":(True, "--output="),
-    "ERROR_FILE":(True, "--error="),
-    "PARTITION":(True, "--partition="),
-    "TIME":(True, "--time="),
+    "OUTPUT_FILE": (True, "--output="),
+    "ERROR_FILE": (True, "--error="),
+    "PARTITION": (True, "--partition="),
+    "TIME": (True, "--time="),
     "EXTRA_NODE_INFO": (True, "--extra-node-info="),
     "BURST_BUFFER": (True, "--bb="),
     "BURST_BUFFER_FILE": (True, "--bbf="),
@@ -56,5 +72,5 @@ SLURM_OPTS = {
     "VERBOSE": (True, "--verbose"),
     "NODE_LIST": (True, "--nodelist="),
     "WRAP": (True, "--wrap="),
-    "EXCLUDE": (True, "--exclude=")
+    "EXCLUDE": (True, "--exclude="),
 }

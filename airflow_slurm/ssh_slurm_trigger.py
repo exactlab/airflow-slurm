@@ -1,36 +1,37 @@
-# This program is free software: you can redistribute it and/or modify it 
-# under the terms of the GNU General Public License as published by 
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
 # the Free Software Foundation, version 3 of the License.
 #
-# This program is distributed in the hope that it will be useful, 
-# but WITHOUT ANY WARRANTY; without even the implied warranty of 
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # See the GNU General Public License for more details.
 #
-# You should have received a copy of the GNU General Public License 
+# You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 # Original Copyright @ecodina and Michele Mastropietro
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
-
 import asyncio
 from typing import Any
 
-from airflow.providers.ssh.hooks.ssh import SSHHook
-from airflow.triggers.base import BaseTrigger, TriggerEvent
-from airflow.exceptions import AirflowException
 import asyncssh
+from airflow.exceptions import AirflowException
+from airflow.providers.ssh.hooks.ssh import SSHHook
+from airflow.triggers.base import BaseTrigger
+from airflow.triggers.base import TriggerEvent
 
 # Use this to hide asyncssh connections logs
 asyncssh.set_log_level("WARN")
 
+
 def parse_scontrol(input: str) -> dict:
     d = dict()
     for i in input.split():
-        l = i.split("=")
-        k = l[0]
-        v = "=".join(l[1:])
+        key_value_pair = i.split("=")
+        k = key_value_pair[0]
+        v = "=".join(key_value_pair[1:])
         d[k] = v
     return d
 
@@ -42,7 +43,7 @@ class SSHSlurmTrigger(BaseTrigger):
         ssh_conn_id: str,
         last_known_state: str | None = None,
         last_known_log_lines: int = 0,
-        tdelta_between_pokes: int = 20
+        tdelta_between_pokes: int = 20,
     ):
         """
         :param jobid: the slurm's job id
@@ -56,9 +57,9 @@ class SSHSlurmTrigger(BaseTrigger):
         self.ssh_hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
         self.ssh_opt = asyncssh.SSHClientConnectionOptions(
             username=self.ssh_hook.username,
-            port=self.ssh_hook.port, 
+            port=self.ssh_hook.port,
             client_keys=self.ssh_hook.key_file,
-            known_hosts=None
+            known_hosts=None,
         )
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
@@ -77,15 +78,16 @@ class SSHSlurmTrigger(BaseTrigger):
         )
 
     async def get_scontrol_output(self) -> dict | None:
-        """
-        With the job id we look at what state it is in the slurm using scontrol.
-        In some cases we may find that the job still does not appear.
+        """With the job id we look at what state it is in the slurm using
+        scontrol. In some cases we may find that the job still does not appear.
         In this case, we will retry later up to 3 times.
 
-        :return: a dictionary with job information or None if we haven't found the job
-
+        :return: a dictionary with job information or None if we haven't
+            found the job
         """
-        async with asyncssh.connect(host=self.ssh_hook.remote_host, options=self.ssh_opt) as conn:
+        async with asyncssh.connect(
+            host=self.ssh_hook.remote_host, options=self.ssh_opt
+        ) as conn:
             result = await conn.run(f"scontrol show job {self.jobid}")
 
         output = result.stdout
@@ -98,7 +100,9 @@ class SSHSlurmTrigger(BaseTrigger):
 
         if not output:
             if self.sacct_try > 2:
-                raise AirflowException("SCONTROL didn't return any job information")
+                raise AirflowException(
+                    "SCONTROL didn't return any job information"
+                )
             else:
                 self.sacct_try += 1
                 return
@@ -115,19 +119,26 @@ class SSHSlurmTrigger(BaseTrigger):
         }
 
     async def get_log(self, out_file) -> list[str]:
-        """
-        We read the log from the last line we had read to the last complete line (that has \n at the end).
-        In some cases, the file takes a while to appear. We will try 3 times. From then on, the Trigger
-        will call the SlurmOperator and a line will be added to the Airflow log warning that the Slurm log does not exist.
+        """We read the log from the last line we had read to the last complete
+        line (that has \n at the end). In some cases, the file takes a while to
+        appear. We will try 3 times. From then on, the Trigger will call the
+        SlurmOperator and a line will be added to the Airflow log warning that
+        the Slurm log does not exist.
 
         :return: a list with all lines
         """
         try:
-            async with asyncssh.connect(host=self.ssh_hook.remote_host, options=self.ssh_opt) as conn:
+            async with asyncssh.connect(
+                host=self.ssh_hook.remote_host, options=self.ssh_opt
+            ) as conn:
                 result = await conn.run(f"cat {out_file}")
-            
+
             log = result.stdout.split("\n")
-            assert type(log) == list
+            if not isinstance(log, list):
+                raise TypeError(
+                    f"Expected 'log' to be of type 'list', but got {type(log)}"
+                )
+
             if len(log) != self.last_known_log_lines:
                 # The log has new lines
                 to_return = log[self.last_known_log_lines :]
@@ -151,9 +162,7 @@ class SSHSlurmTrigger(BaseTrigger):
         return to_return
 
     async def run(self):
-        """
-        The function that runs when we do a defer of the SlurmOperator
-        """
+        """The function that runs when we do a defer of the SlurmOperator."""
         # How many attempts do we have to read the job information and the log?
         # In some cases, the log file and information in sacct take a while to appear
         # We allow 3 attempts at each thing before failing / showing an error
@@ -164,7 +173,7 @@ class SSHSlurmTrigger(BaseTrigger):
             await asyncio.sleep(self.tdelta_between_pokes)
 
             slurm_job = await self.get_scontrol_output()
-            slurm_log = await self.get_log(slurm_job.get("log_out",None))
+            slurm_log = await self.get_log(slurm_job.get("log_out", None))
 
             self.log.debug(f"{slurm_job=} \n {slurm_log=}")
 
@@ -172,7 +181,9 @@ class SSHSlurmTrigger(BaseTrigger):
                 # In some cases we do not have the information in the sacct instantly, we will try again from here
                 # self.tdelta_between_pokes seconds
 
-                slurm_changed_state = slurm_job["state"] != self.last_known_state
+                slurm_changed_state = (
+                    slurm_job["state"] != self.last_known_state
+                )
                 self.last_known_state = slurm_job["state"]
 
                 if slurm_log or slurm_changed_state:

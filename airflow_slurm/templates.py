@@ -1,7 +1,7 @@
 from jinja2 import Template
 
 SLURM_FILE = Template(
-"""#!/bin/bash
+    """#!/bin/bash
 {%- for opt, value in slurm_opts.items() %}
 #SBATCH {{ value }}
 {%- endfor %}

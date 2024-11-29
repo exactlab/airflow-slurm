@@ -6,7 +6,7 @@ This document lists all the available keys that can be used in the `slurm_option
 
 - **`JOB_NAME`**: Set the job name.
   - Example: `--job-name=example_job`
-  
+
 - **`OUTPUT_FILE`**: Specify the output file for standard output.
   - Example: `--output=output.log`
 
