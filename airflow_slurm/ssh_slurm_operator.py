@@ -14,13 +14,11 @@
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
 
-from pathlib import Path
-from typing import Dict, Optional, Sequence, Any, List
+from typing import Sequence, Any
 import dateutil.parser
 
 from airflow.compat.functools import cached_property
 from airflow.exceptions import AirflowException, AirflowSkipException
-from airflow.models import Variable
 from airflow.models.baseoperator import BaseOperator
 from airflow.utils.context import Context
 from airflow.utils.operator_helpers import context_to_airflow_vars
@@ -29,16 +27,13 @@ from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow_slurm.constants import SACCT_COMPLETED_OK, SACCT_FAILED, SACCT_FINISHED, SACCT_RUNNING, SLURM_OPTS
 
 from airflow_slurm.ssh_slurm_trigger import SSHSlurmTrigger
-
-
+from airflow_slurm.templates import SLURM_FILE
 
 class SSHSlurmOperator(BaseOperator):
     r"""
     Run a linux script or command through Slurm.
 
     :param command: the command or path to the script to be executed. Allow use of jinja
-    :param env: a dictionary with the environment variables that slurm will see. At least "SBATCH_JOB_NAME".
-        Allow use of jinja
     :param slurm_options: other parameters we'll pass to SBATCH because it doesn't accept working with variables
         of environment To see the list: SLURM_OPTS dictionary of this file
     :param tdelta_between_checks: how many seconds do we check SACCT to know the status of the job?
@@ -46,8 +41,8 @@ class SSHSlurmOperator(BaseOperator):
     If do_xcom_push = True, the last line of the subprocess will be written to XCom
     """
 
-    template_fields: Sequence[str] = ('command', 'env', 'slurm_options')
-    template_fields_renderers = {'command': 'bash', 'env': 'json'}
+    template_fields: Sequence[str] = ('command', 'slurm_options')
+    template_fields_renderers = {'command': 'bash'}
     template_ext: Sequence[str] = (
         '.bash',
     )
@@ -58,119 +53,91 @@ class SSHSlurmOperator(BaseOperator):
             *,
             command: str,
             ssh_conn_id: str,
-            env: Optional[Dict[str, str]] = None,
             tdelta_between_checks: int = 5,
-            slurm_options: Optional[Dict[str, Any]] = None,
-            slurm_log_dir: str | None = None,
+            slurm_options: dict[str, Any] | None = None,
             **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.command = command
         self.ssh_conn_id = ssh_conn_id
-        self.env = env
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
-        self.slurm_log_dir = slurm_log_dir or "/tmp"
 
     @cached_property
     def ssh_hook(self):
         """Returns hook for running the command"""
         return SSHHook(ssh_conn_id=self.ssh_conn_id)
 
-    def get_env(self, context):
+    def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """
-        Create a dictionary with the environment variables that sbatch will see.
+        Render the SLURM script using the Jinja2 template and the operator's context.
 
-        In addition, modify the job name in order to put the date and time of execution
+        :param context: Airflow context
+        :return: Rendered SLURM script as a string
         """
-        self.log.info("ENV: " + str(self.env))
-        if self.env is not None:
-            env = self.env
-        else:
-            env = dict()
 
+        # Mangle job name with submission date
         airflow_context_vars = context_to_airflow_vars(context, in_env_var_format=True)
         job_date = dateutil.parser.isoparse(airflow_context_vars["AIRFLOW_CTX_EXECUTION_DATE"]).strftime("%Y%m%dT%H%M")
-        self.log.debug(
-            'Exporting the following env vars:\n%s',
-            '\n'.join(f"{k}={v}" for k, v in airflow_context_vars.items()),
-        )
-        env.update(airflow_context_vars)
-        env["SBATCH_JOB_NAME"] = f'{env["SBATCH_JOB_NAME"]}_{job_date}'
-        return env
+        self.slurm_options["JOB_NAME"] = f'{self.slurm_options.get("JOB_NAME", "airflow_slurm_job")}_{job_date}'
 
-    def build_sbatch_command(self) -> List[str]:
-        """
-        It is the function that builds the order of the sbatch from the instructions given to the DAG.
-
-        :return: the command that will execute the subprocess, in a list
-        """
-        # There must be the --parsable option: this way we can read the job id much easier
-        cmd = ["sbatch", "--parsable"]
-
-        cmd.append(f"--output={Path(self.slurm_log_dir) / 'slurm-%j.out'}")
-
-        if self.slurm_options:
-            # We have extra options, which we cannot pass to slurm via environment variables
-            try:
-                for opt in self.slurm_options:
-                    if not SLURM_OPTS[opt][0]:
-                        cmd.append(SLURM_OPTS[opt][1])
-                    else:
-                        cmd.append(f"{SLURM_OPTS[opt][1]}{self.slurm_options[opt]}")
-            except:
-                raise AirflowException(
-                    f"Please make sure all the slurm options are correctly set: {self.slurm_options}")
-
-        cmd.append(self.command)
-
-        return cmd
+        # Process slurm options
+        slurm_opts = {}
+        for key, value in self.slurm_options.items():
+            if key in SLURM_OPTS:
+                has_value, opt_string = SLURM_OPTS[key]
+                if has_value:
+                    slurm_opts[key] = f"{opt_string}{value}"
+                else:
+                    slurm_opts[key] = opt_string
+        
+        slurm_script = SLURM_FILE.render(slurm_opts=slurm_opts, job_command=self.command)
+        return slurm_script
 
     def execute(self, context: Context):
         """
         The function that is executed when we call this operator
         """
 
-        env = self.get_env(context)
-        self.check_job_not_running(env, context)
+        slurm_script = self.parse_input_and_render_slurm_script(context)
 
-        command = self.build_sbatch_command()
+        self.check_job_not_running(context)
+
 
         with self.ssh_hook.get_conn() as client:
+            command = f"echo -e '{slurm_script}' | sbatch --parsable"
             exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
                 ssh_client=client,
-                command=" ".join(command),
-                environment=env,
-                get_pty=True,
+                command=command,
+                environment=None,
+                get_pty=False,
             )
-        output = stdout.decode().strip()
-        error = stderr.decode().strip()
-        self.log.debug(f"{output}")
 
-        if exit_code != 0:
-            raise AirflowException(
-                f'SBATCH command failed. The command returned a non-zero exit code {exit_code}, '
-                f'with output {output} and error {error}'
+            output = stdout.decode().strip()
+            error = stderr.decode().strip()
+            self.log.debug(f"{output}")
+
+            if exit_code != 0:
+                raise AirflowException(
+                    f'SBATCH command failed. The command returned a non-zero exit code {exit_code}, '
+                    f'with output {output} and error {error}'
+                )
+            elif not str(output).isdigit():
+                raise AirflowException(f"SBATCH command did not return a job id: {output}")
+
+            self.log.info(f"Submitted batch job {output}")
+
+            # Defer execution for the SLURM trigger
+            self.defer(
+                trigger=SSHSlurmTrigger(
+                    output,
+                    ssh_conn_id=self.ssh_conn_id,
+                    tdelta_between_pokes=self.tdelta_between_checks,
+                ),
+                method_name="new_slurm_state_log"
             )
-        elif not str(output).isdigit():
-            raise AirflowException(f"SBATCH command did not return a job id: {output}")
 
-        self.log.info(f"Submitted batch job {output}")
-
-        # We already have the job id. We expect a status change / new lines in the log
-        self.defer(
-            trigger=SSHSlurmTrigger(
-                output, 
-                ssh_conn_id=self.ssh_conn_id,
-                slurm_log_dir=self.slurm_log_dir,
-                tdelta_between_pokes=self.tdelta_between_checks
-            ),
-            method_name="new_slurm_state_log"
-        )
-
-        return output
-
-    def check_job_not_running(self, env: dict, context):
+    def check_job_not_running(self, context):
         """
         Check that there is no job in the slurm with the current execution date (hour and minute). If so,
         skips the current task.
@@ -178,20 +145,20 @@ class SSHSlurmOperator(BaseOperator):
         In case the user passes, through the dag_config (--config / UI) the parameter "ignore_multiple_jobs"=true,
         we run the task anyway.
 
-        :param env:
         :param context:
         :return:
         """
         if context["params"].get("ignore_multiple_jobs", False):
-            self.log.info(f"Ignoring if there are multiple slurm jobs submitted with the same job name ({env['SBATCH_JOB_NAME']})")
+            self.log.info(f"Ignoring if there are multiple slurm jobs submitted with the same job name ({self.slurm_options['JOB_NAME']})")
             return
 
-        self.log.info(f"Checking if job {env['SBATCH_JOB_NAME']} is already running...")
+        self.log.info(f"Checking if job {self.slurm_options['JOB_NAME']} is already running...")
+        
         with self.ssh_hook.get_conn() as client:
             exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
                 ssh_client=client,
-                command=" ".join(["squeue", "-n", env["SBATCH_JOB_NAME"], "-h", "-o", "%i"]),
-                environment=env,
+                command=" ".join(["squeue", "-n", self.slurm_options['JOB_NAME'], "-h", "-o", "%i"]),
+                environment=None,
                 get_pty=True,
             )
         out = stdout.decode()
@@ -201,7 +168,7 @@ class SSHSlurmOperator(BaseOperator):
         if len(out.split()) > 0:
             raise AirflowSkipException("According to SQUEUE this job is already running for this date!")
 
-    def new_slurm_state_log(self, context, event: Dict[str, Any] = None):
+    def new_slurm_state_log(self, context, event: dict[str, Any] = None):
         """
         It is the function that SSHSlurmTrigger calls when there has been a state change in the SLURM or there are new lines in the file
         of log.
@@ -237,7 +204,6 @@ class SSHSlurmOperator(BaseOperator):
                 trigger=SSHSlurmTrigger(
                     event["slurm_job"]["job_id"],
                     ssh_conn_id=self.ssh_conn_id,
-                    slurm_log_dir=self.slurm_log_dir,
                     last_known_state=event["slurm_job"]["state"],
                     last_known_log_lines=event["log_number_lines"],
                     tdelta_between_pokes=self.tdelta_between_checks
@@ -248,7 +214,7 @@ class SSHSlurmOperator(BaseOperator):
             raise AirflowException(f"SACCT returned an unknown state for job #{event['slurm_job']['job_id']}: "
                                    f"{event['slurm_job']['state']}")
 
-    def _log_status_change(self, event: Dict[str, Any]):
+    def _log_status_change(self, event: dict[str, Any]):
         self.log.info(f"Slurm reports job #{event['slurm_job']['job_id']} ({event['slurm_job']['job_name']}) has "
                       f"changed its state to {event['slurm_job']['state']} "
                       f"with reason {event['slurm_job']['reason']}")

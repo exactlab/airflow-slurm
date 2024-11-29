@@ -4,9 +4,14 @@ SACCT_FAILED = ('BOOT_FAIL', 'CANCELLED', 'DEADLINE', 'FAILED', 'NODE_FAIL', 'OU
 SACCT_RUNNING = ('PENDING', 'PREEMPTED', 'RUNNING', 'REQUEUED', 'RESIZING', 'SUSPENDED')
 SACCT_FINISHED = SACCT_COMPLETED_OK + SACCT_FAILED
 
-######### SBATCH OPTIONS (NOT AVAILABLE THROUGH ENV VARS) ##############
+######### SBATCH OPTIONS ##############
 # Dictionary: slurm option: (need user input?, slurm argument, with '=' if necessary)
 SLURM_OPTS = {
+    "JOB_NAME": (True, "--job-name="),
+    "OUTPUT_FILE":(True, "--output="),
+    "ERROR_FILE":(True, "--error="),
+    "PARTITION":(True, "--partition="),
+    "TIME":(True, "--time="),
     "EXTRA_NODE_INFO": (True, "--extra-node-info="),
     "BURST_BUFFER": (True, "--bb="),
     "BURST_BUFFER_FILE": (True, "--bbf="),
@@ -20,7 +25,6 @@ SLURM_OPTS = {
     "CPUS_PER_TASK": (True, "--cpus-per-task="),
     "DEADLINE": (True, "--deadline="),
     "DEPENDENCY": (True, "--dependency="),
-    "ERROR": (True, "--error="),
     "EXPORT_FILE": (True, "--export-file="),
     "NODE_FILE": (True, "--nodefile="),
     "GID": (True, "--gid="),

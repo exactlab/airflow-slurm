@@ -15,13 +15,11 @@
 # Licence: GPLv3
 
 import asyncio
-from pathlib import Path
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Any
 
 from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 from airflow.exceptions import AirflowException
-from airflow.models import Variable
 import asyncssh
 
 # Use this to hide asyncssh connections logs
@@ -42,8 +40,7 @@ class SSHSlurmTrigger(BaseTrigger):
         self,
         jobid: str,
         ssh_conn_id: str,
-        slurm_log_dir: str,
-        last_known_state: Optional[str] = None,
+        last_known_state: str | None = None,
         last_known_log_lines: int = 0,
         tdelta_between_pokes: int = 20
     ):
@@ -56,7 +53,6 @@ class SSHSlurmTrigger(BaseTrigger):
         super().__init__()
         self.jobid = jobid
         self.ssh_conn_id = ssh_conn_id
-        self.slurm_log_dir = slurm_log_dir
         self.ssh_hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
         self.ssh_opt = asyncssh.SSHClientConnectionOptions(
             username=self.ssh_hook.username,
@@ -67,22 +63,20 @@ class SSHSlurmTrigger(BaseTrigger):
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
-        self.slurm_log_path = Path(slurm_log_dir) / f"slurm-{self.jobid}.out"
 
-    def serialize(self) -> Tuple[str, Dict[str, Any]]:
+    def serialize(self) -> tuple[str, dict[str, Any]]:
         return (
             "airflow_slurm.ssh_slurm_trigger.SSHSlurmTrigger",
             {
                 "jobid": self.jobid,
                 "ssh_conn_id": self.ssh_conn_id,
-                "slurm_log_dir": self.slurm_log_dir,
                 "last_known_state": self.last_known_state,
                 "last_known_log_lines": self.last_known_log_lines,
                 "tdelta_between_pokes": self.tdelta_between_pokes,
             },
         )
 
-    async def get_scontrol_output(self) -> Optional[dict]:
+    async def get_scontrol_output(self) -> dict | None:
         """
         With the job id we look at what state it is in the slurm using scontrol.
         In some cases we may find that the job still does not appear.
@@ -120,7 +114,7 @@ class SSHSlurmTrigger(BaseTrigger):
             "log_err": sl_out["StdErr"],
         }
 
-    async def get_log(self) -> List[str]:
+    async def get_log(self, out_file) -> list[str]:
         """
         We read the log from the last line we had read to the last complete line (that has \n at the end).
         In some cases, the file takes a while to appear. We will try 3 times. From then on, the Trigger
@@ -130,7 +124,7 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         try:
             async with asyncssh.connect(host=self.ssh_hook.remote_host, options=self.ssh_opt) as conn:
-                result = await conn.run(f"cat {self.slurm_log_path}")
+                result = await conn.run(f"cat {out_file}")
             
             log = result.stdout.split("\n")
             assert type(log) == list
@@ -148,7 +142,7 @@ class SSHSlurmTrigger(BaseTrigger):
         except Exception as e:
             if self.log_try > 2:
                 to_return = [
-                    f"{e}\nSlurm's file log is still not available: {self.slurm_log_path}"
+                    f"{e}\nSlurm's file log is still not available: {out_file}"
                 ]
             else:
                 self.log_try += 1
@@ -170,7 +164,7 @@ class SSHSlurmTrigger(BaseTrigger):
             await asyncio.sleep(self.tdelta_between_pokes)
 
             slurm_job = await self.get_scontrol_output()
-            slurm_log = await self.get_log()
+            slurm_log = await self.get_log(slurm_job.get("log_out",None))
 
             self.log.debug(f"{slurm_job=} \n {slurm_log=}")
 
