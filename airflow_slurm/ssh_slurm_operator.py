@@ -57,6 +57,8 @@ class SSHSlurmOperator(BaseOperator):
         ssh_conn_id: str,
         tdelta_between_checks: int = 5,
         slurm_options: dict[str, Any] | None = None,
+        modules: list[str] | None = None,
+        setup_commands: list[str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -64,6 +66,8 @@ class SSHSlurmOperator(BaseOperator):
         self.ssh_conn_id = ssh_conn_id
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
+        self.modules = modules
+        self.setup_commands = setup_commands
 
     @cached_property
     def ssh_hook(self):
@@ -100,7 +104,10 @@ class SSHSlurmOperator(BaseOperator):
                     slurm_opts[key] = opt_string
 
         slurm_script = SLURM_FILE.render(
-            slurm_opts=slurm_opts, job_command=self.command
+            slurm_opts=slurm_opts,
+            job_command=self.command,
+            modules=self.modules,
+            setup_commands=self.setup_commands,
         )
         return slurm_script
 
@@ -112,7 +119,9 @@ class SSHSlurmOperator(BaseOperator):
         self.check_job_not_running(context)
 
         with self.ssh_hook.get_conn() as client:
-            command = f"echo -e '{slurm_script}' | sbatch --parsable"
+            command = (
+                f"bash -l -c \"echo -e '{slurm_script}' | sbatch --parsable\""
+            )
             exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
                 ssh_client=client,
                 command=command,
@@ -170,15 +179,9 @@ class SSHSlurmOperator(BaseOperator):
         with self.ssh_hook.get_conn() as client:
             exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
                 ssh_client=client,
-                command=" ".join(
-                    [
-                        "squeue",
-                        "-n",
-                        self.slurm_options["JOB_NAME"],
-                        "-h",
-                        "-o",
-                        "%i",
-                    ]
+                command=(
+                    "bash -l -c 'squeue -n"
+                    f" {self.slurm_options['JOB_NAME']} -h -o %i'"
                 ),
                 environment=None,
                 get_pty=True,

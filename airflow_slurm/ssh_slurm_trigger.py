@@ -88,7 +88,9 @@ class SSHSlurmTrigger(BaseTrigger):
         async with asyncssh.connect(
             host=self.ssh_hook.remote_host, options=self.ssh_opt
         ) as conn:
-            result = await conn.run(f"scontrol show job {self.jobid}")
+            result = await conn.run(
+                f"bash -l -c 'scontrol show job {self.jobid}'"
+            )
 
         output = result.stdout
         error = result.stderr
