@@ -45,7 +45,12 @@ class SSHSlurmOperator(BaseOperator):
     If do_xcom_push = True, the last line of the subprocess will be written to XCom
     """
 
-    template_fields: Sequence[str] = ("command", "slurm_options")
+    template_fields: Sequence[str] = (
+        "command",
+        "slurm_options",
+        "modules",
+        "setup_commands",
+    )
     template_fields_renderers = {"command": "bash"}
     template_ext: Sequence[str] = (".bash",)
     ui_color = "#e4ecf7"
