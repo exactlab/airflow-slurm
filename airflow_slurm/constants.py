@@ -73,4 +73,5 @@ SLURM_OPTS = {
     "NODE_LIST": (True, "--nodelist="),
     "WRAP": (True, "--wrap="),
     "EXCLUDE": (True, "--exclude="),
+    "ARRAY": (True, "--array="),
 }

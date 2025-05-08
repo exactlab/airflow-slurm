@@ -165,3 +165,6 @@ This document lists all the available keys that can be used in the `slurm_option
 
 - **`EXCLUDE`**: Exclude specific nodes from job execution.
   - Example: `--exclude=node3`
+
+- **`ARRAY`**: Submit a job array, multiple jobs to be executed with identical parameters.
+  - Example: `--array=0-15`
