@@ -129,7 +129,7 @@ class SSHSlurmOperator(BaseOperator):
             )
             stdin.write(slurm_script)
             stdin.channel.shutdown_write()
-            self.log.debug(f"Running sbatch script:\n{slurm_script}")
+            self.log.info(f"Running script:\n{slurm_script}")
             output = stdout.read().decode().strip()
             error = stderr.read().decode().strip()
             self.log.debug(f"{output}")
