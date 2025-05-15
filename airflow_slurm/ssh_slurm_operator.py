@@ -124,19 +124,16 @@ class SSHSlurmOperator(BaseOperator):
         self.check_job_not_running(context)
 
         with self.ssh_hook.get_conn() as client:
-            command = (
-                f"bash -l -c \"echo -e '{slurm_script}' | sbatch --parsable\""
+            stdin, stdout, stderr = client.exec_command(
+                "bash -l -c 'sbatch --parsable'"
             )
-            exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
-                ssh_client=client,
-                command=command,
-                environment=None,
-                get_pty=False,
-            )
-
-            output = stdout.decode().strip()
-            error = stderr.decode().strip()
+            stdin.write(slurm_script)
+            stdin.channel.shutdown_write()
+            self.log.info(f"Running script:\n{slurm_script}")
+            output = stdout.read().decode().strip()
+            error = stderr.read().decode().strip()
             self.log.debug(f"{output}")
+            exit_code = stdout.channel.recv_exit_status()
 
             if exit_code != 0:
                 raise AirflowException(
