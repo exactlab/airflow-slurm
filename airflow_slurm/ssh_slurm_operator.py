@@ -124,7 +124,9 @@ class SSHSlurmOperator(BaseOperator):
         self.check_job_not_running(context)
 
         with self.ssh_hook.get_conn() as client:
-            stdin, stdout, stderr = client.exec_command("sbatch --parsable")
+            stdin, stdout, stderr = client.exec_command(
+                "bash -l -c 'sbatch --parsable'"
+            )
             stdin.write(slurm_script)
             stdin.channel.shutdown_write()
             output = stdout.read().decode().strip()
