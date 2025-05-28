@@ -19,7 +19,6 @@ from typing import Sequence
 import dateutil.parser
 from airflow.compat.functools import cached_property
 from airflow.exceptions import AirflowException
-from airflow.exceptions import AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
 from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow.utils.context import Context
@@ -194,10 +193,10 @@ class SSHSlurmOperator(BaseOperator):
                 f"Command execution failed. Exit code: {exit_code}. Error output: {out}"
             )
         self.log.info(f"{out}")
-        if len(out.split()) > 0:
-            raise AirflowSkipException(
-                "According to SQUEUE this job is already running for this date!"
-            )
+        # if len(out.split()) > 0:
+        #     raise AirflowSkipException(
+        #         "According to SQUEUE this job is already running for this date!"
+        #     )
 
     def new_slurm_state_log(self, context, event: dict[str, Any] = None):
         """It is the function that SSHSlurmTrigger calls when there has been a
