@@ -85,17 +85,22 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a dictionary with job information or None if we haven't
             found the job
         """
-        async with asyncssh.connect(
-            host=self.ssh_hook.remote_host, options=self.ssh_opt
-        ) as conn:
-            result = await conn.run(
+        # async with asyncssh.connect(
+        #     host=self.ssh_hook.remote_host, options=self.ssh_opt
+        # ) as conn:
+        #     result = await conn.run(
+        #         f"bash -l -c 'scontrol show job {self.jobid}'"
+        #     )
+        with self.ssh_hook.get_conn() as client:
+            stdin, stdout, stderr = client.exec_command(
                 f"bash -l -c 'scontrol show job {self.jobid}'"
             )
+            stdin.channel.shutdown_write()
+            output = stdout.read().decode().strip()
+            error = stderr.read().decode().strip()
+            exit_code = stdout.channel.recv_exit_status()
 
-        output = result.stdout
-        error = result.stderr
-
-        if result.returncode != 0:
+        if exit_code != 0:
             raise AirflowException(
                 f"SCONTROL returned a non-zero exit code: {error}"
             )
