@@ -47,9 +47,9 @@ class SSHSlurmTrigger(BaseTrigger):
     ):
         """
         :param jobid: the slurm's job id
-        :param last_known_state: the last known slurm's state (see mycompany.operators.ssh_slurm_operator.SACCT_*)
+        :param last_known_state: the last known slurm's state
         :param last_known_log_lines: how many lines did the log have IN TOTAL the last time we opened it?
-        :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & SACCT
+        :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & scontrol
         """
         super().__init__()
         self.jobid = jobid
@@ -85,20 +85,17 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a dictionary with job information or None if we haven't
             found the job
         """
-        # async with asyncssh.connect(
-        #     host=self.ssh_hook.remote_host, options=self.ssh_opt
-        # ) as conn:
-        #     result = await conn.run(
-        #         f"bash -l -c 'scontrol show job {self.jobid}'"
-        #     )
-        with self.ssh_hook.get_conn() as client:
-            stdin, stdout, stderr = client.exec_command(
-                f"bash -l -c 'scontrol show job {self.jobid}'"
-            )
-            stdin.channel.shutdown_write()
-            output = stdout.read().decode().strip()
-            error = stderr.read().decode().strip()
-            exit_code = stdout.channel.recv_exit_status()
+
+        proc = await asyncio.create_subprocess_shell(
+            f"bash -l -c 'scontrol show job {self.jobid}'",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout, stderr = await proc.communicate()
+        output = stdout.decode().strip()
+        error = stdout.decode().strip()
+        exit_code = proc.returncode
 
         if exit_code != 0:
             raise AirflowException(
@@ -106,12 +103,12 @@ class SSHSlurmTrigger(BaseTrigger):
             )
 
         if not output:
-            if self.sacct_try > 2:
+            if self.scontrol_try > 2:
                 raise AirflowException(
                     "SCONTROL didn't return any job information"
                 )
             else:
-                self.sacct_try += 1
+                self.scontrol_try += 1
                 return
 
         sl_out = parse_scontrol(output)
@@ -135,12 +132,14 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a list with all lines
         """
         try:
-            async with asyncssh.connect(
-                host=self.ssh_hook.remote_host, options=self.ssh_opt
-            ) as conn:
-                result = await conn.run(f"cat {out_file}")
+            proc = await asyncio.create_subprocess_shell(
+                f"cat {out_file}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
-            log = result.stdout.split("\n")
+            stdout, _ = await proc.communicate()
+            log = stdout.decode().strip().split("\n")
             if not isinstance(log, list):
                 raise TypeError(
                     f"Expected 'log' to be of type 'list', but got {type(log)}"
@@ -171,10 +170,10 @@ class SSHSlurmTrigger(BaseTrigger):
     async def run(self):
         """The function that runs when we do a defer of the SlurmOperator."""
         # How many attempts do we have to read the job information and the log?
-        # In some cases, the log file and information in sacct take a while to appear
+        # In some cases, the log file and information in scontrol take a while to appear
         # We allow 3 attempts at each thing before failing / showing an error
         self.log_try = 0
-        self.sacct_try = 0
+        self.scontrol_try = 0
 
         while True:
             await asyncio.sleep(self.tdelta_between_pokes)
@@ -185,7 +184,7 @@ class SSHSlurmTrigger(BaseTrigger):
             self.log.debug(f"{slurm_job=} \n {slurm_log=}")
 
             if slurm_job:
-                # In some cases we do not have the information in the sacct instantly, we will try again from here
+                # In some cases we do not have the information in the scontrol instantly, we will try again from here
                 # self.tdelta_between_pokes seconds
 
                 slurm_changed_state = (
