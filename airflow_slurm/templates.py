@@ -6,12 +6,7 @@ SLURM_FILE = Template(
 #SBATCH {{ value }}
 {%- endfor %}
 
-{%- if modules %}
-# Load required modules
-{%- for module in modules %}
-module load {{ module }}
-{%- endfor %}
-{%- endif %}
+source ${HOME}/env
 
 {%- if setup_commands %}
 # Additional setup commands

@@ -47,7 +47,6 @@ class SSHSlurmOperator(BaseOperator):
     template_fields: Sequence[str] = (
         "command",
         "slurm_options",
-        "modules",
         "setup_commands",
     )
     template_fields_renderers = {"command": "bash"}
@@ -61,7 +60,6 @@ class SSHSlurmOperator(BaseOperator):
         ssh_conn_id: str,
         tdelta_between_checks: int = 5,
         slurm_options: dict[str, Any] | None = None,
-        modules: list[str] | None = None,
         setup_commands: list[str] | None = None,
         **kwargs,
     ) -> None:
@@ -70,7 +68,6 @@ class SSHSlurmOperator(BaseOperator):
         self.ssh_conn_id = ssh_conn_id
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
-        self.modules = modules
         self.setup_commands = setup_commands
 
     @cached_property
@@ -110,7 +107,6 @@ class SSHSlurmOperator(BaseOperator):
         slurm_script = SLURM_FILE.render(
             slurm_opts=slurm_opts,
             job_command=self.command,
-            modules=self.modules,
             setup_commands=self.setup_commands,
         )
         return slurm_script
