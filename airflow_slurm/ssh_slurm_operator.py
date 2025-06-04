@@ -200,7 +200,7 @@ class SSHSlurmOperator(BaseOperator):
                 f"Command execution failed. Exit code: {exit_code}. Error output: {stderr.strip()}"
             )
 
-        self.log.info(stdout.strip())
+        self.log.info(f"squeue stdout:\n{stdout.strip()}")
 
         if len(stdout.split()) > 0:
             raise AirflowSkipException(
