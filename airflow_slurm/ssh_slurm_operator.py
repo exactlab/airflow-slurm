@@ -13,21 +13,21 @@
 # Original Copyright @ecodina and Michele Mastropietro
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
+import subprocess  # nosec
 from typing import Any
 from typing import Sequence
 
 import dateutil.parser
-from airflow.compat.functools import cached_property
 from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
-from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow.utils.context import Context
 from airflow.utils.operator_helpers import context_to_airflow_vars
 
-from airflow_slurm.constants import SACCT_COMPLETED_OK
-from airflow_slurm.constants import SACCT_FAILED
-from airflow_slurm.constants import SACCT_FINISHED
-from airflow_slurm.constants import SACCT_RUNNING
+from airflow_slurm.constants import SCONTROL_COMPLETED_OK
+from airflow_slurm.constants import SCONTROL_FAILED
+from airflow_slurm.constants import SCONTROL_FINISHED
+from airflow_slurm.constants import SCONTROL_RUNNING
 from airflow_slurm.constants import SLURM_OPTS
 from airflow_slurm.ssh_slurm_trigger import SSHSlurmTrigger
 from airflow_slurm.templates import SLURM_FILE
@@ -39,7 +39,7 @@ class SSHSlurmOperator(BaseOperator):
     :param command: the command or path to the script to be executed. Allow use of jinja
     :param slurm_options: other parameters we'll pass to SBATCH because it doesn't accept working with variables
         of environment To see the list: SLURM_OPTS dictionary of this file
-    :param tdelta_between_checks: how many seconds do we check SACCT to know the status of the job?
+    :param tdelta_between_checks: how many seconds do we check scontrol to know the status of the job?
 
     If do_xcom_push = True, the last line of the subprocess will be written to XCom
     """
@@ -58,6 +58,8 @@ class SSHSlurmOperator(BaseOperator):
         self,
         *,
         command: str,
+        # TODO: this is useless at this point,
+        # I'll leave it here to avoid breaking changes
         ssh_conn_id: str,
         tdelta_between_checks: int = 5,
         slurm_options: dict[str, Any] | None = None,
@@ -72,11 +74,6 @@ class SSHSlurmOperator(BaseOperator):
         self.tdelta_between_checks = tdelta_between_checks
         self.modules = modules
         self.setup_commands = setup_commands
-
-    @cached_property
-    def ssh_hook(self):
-        """Returns hook for running the command."""
-        return SSHHook(ssh_conn_id=self.ssh_conn_id)
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """Render the SLURM script using the Jinja2 template and the operator's
@@ -122,29 +119,32 @@ class SSHSlurmOperator(BaseOperator):
 
         self.check_job_not_running(context)
 
-        with self.ssh_hook.get_conn() as client:
-            stdin, stdout, stderr = client.exec_command(
-                "bash -l -c 'sbatch --parsable'"
-            )
-            stdin.write(slurm_script)
-            stdin.channel.shutdown_write()
+        try:
             self.log.info(f"Running script:\n{slurm_script}")
-            output = stdout.read().decode().strip()
-            error = stderr.read().decode().strip()
+
+            process = subprocess.Popen(  # nosec
+                ["bash", "-l", "-c", "sbatch --parsable"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            output, error = process.communicate(input=slurm_script)
+            exit_code = process.returncode
+
             self.log.debug(f"{output}")
-            exit_code = stdout.channel.recv_exit_status()
 
             if exit_code != 0:
                 raise AirflowException(
                     f"SBATCH command failed. The command returned a non-zero exit code {exit_code}, "
                     f"with output {output} and error {error}"
                 )
-            elif not str(output).isdigit():
+            elif not str(output).strip().isdigit():
                 raise AirflowException(
                     f"SBATCH command did not return a job id: {output}"
                 )
 
-            self.log.info(f"Submitted batch job {output}")
+            self.log.info(f"Submitted batch job {output.strip()}")
 
             # Defer execution for the SLURM trigger
             self.defer(
@@ -155,6 +155,9 @@ class SSHSlurmOperator(BaseOperator):
                 ),
                 method_name="new_slurm_state_log",
             )
+
+        except Exception as e:
+            raise AirflowException(f"Error running sbatch: {e}")
 
     def check_job_not_running(self, context):
         """Check that there is no job in the slurm with the current execution
@@ -177,26 +180,32 @@ class SSHSlurmOperator(BaseOperator):
             f"Checking if job {self.slurm_options['JOB_NAME']} is already running..."
         )
 
-        with self.ssh_hook.get_conn() as client:
-            exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
-                ssh_client=client,
-                command=(
-                    "bash -l -c 'squeue -n"
-                    f" {self.slurm_options['JOB_NAME']} -h -o %i'"
-                ),
-                environment=None,
-                get_pty=True,
-            )
-        out = stdout.decode()
+        command = (
+            f"bash -l -c 'squeue -n {self.slurm_options['JOB_NAME']} -h -o %i'"
+        )
+        process = subprocess.run(
+            command,
+            shell=True,  # nosec
+            capture_output=True,
+            text=True,
+        )
+
+        stdout = process.stdout
+        stderr = process.stderr
+        exit_code = process.returncode
+
+        # Log and handle errors
         if exit_code > 0:
             raise AirflowException(
-                f"Command execution failed. Exit code: {exit_code}. Error output: {out}"
+                f"Command execution failed. Exit code: {exit_code}. Error output: {stderr.strip()}"
             )
-        self.log.info(f"{out}")
-        # if len(out.split()) > 0:
-        #     raise AirflowSkipException(
-        #         "According to SQUEUE this job is already running for this date!"
-        #     )
+
+        self.log.info(f"squeue stdout:\n{stdout.strip()}")
+
+        if len(stdout.split()) > 0:
+            raise AirflowSkipException(
+                "According to SQUEUE this job is already running for this date!"
+            )
 
     def new_slurm_state_log(self, context, event: dict[str, Any] = None):
         """It is the function that SSHSlurmTrigger calls when there has been a
@@ -212,7 +221,7 @@ class SSHSlurmOperator(BaseOperator):
         """
         if (
             event["slurm_changed_state"]
-            and event["slurm_job"]["state"] not in SACCT_FINISHED
+            and event["slurm_job"]["state"] not in SCONTROL_FINISHED
         ):
             # This is ugly and repetitive, but this way the command stays in the log!
             self._log_status_change(event)
@@ -221,15 +230,15 @@ class SSHSlurmOperator(BaseOperator):
             for line in event["log_new_lines"]:
                 self.log.info(line.rstrip())
 
-        if event["slurm_job"]["state"] in SACCT_COMPLETED_OK:
+        if event["slurm_job"]["state"] in SCONTROL_COMPLETED_OK:
             if event["slurm_changed_state"]:
                 self._log_status_change(event)
             return None
-        elif event["slurm_job"]["state"] in SACCT_FAILED:
+        elif event["slurm_job"]["state"] in SCONTROL_FAILED:
             if event["slurm_changed_state"]:
                 self._log_status_change(event)
             raise AirflowException("Slurm job failed!")
-        elif event["slurm_job"]["state"] in SACCT_RUNNING:
+        elif event["slurm_job"]["state"] in SCONTROL_RUNNING:
             self.defer(
                 trigger=SSHSlurmTrigger(
                     event["slurm_job"]["job_id"],
@@ -242,7 +251,7 @@ class SSHSlurmOperator(BaseOperator):
             )
         else:
             raise AirflowException(
-                f"SACCT returned an unknown state for job #{event['slurm_job']['job_id']}: "
+                f"scontrol returned an unknown state for job #{event['slurm_job']['job_id']}: "
                 f"{event['slurm_job']['state']}"
             )
 

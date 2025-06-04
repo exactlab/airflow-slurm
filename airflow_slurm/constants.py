@@ -1,6 +1,6 @@
 #########  SLURM STATES ###########
-SACCT_COMPLETED_OK = ("COMPLETED",)
-SACCT_FAILED = (
+SCONTROL_COMPLETED_OK = ("COMPLETED",)
+SCONTROL_FAILED = (
     "BOOT_FAIL",
     "CANCELLED",
     "DEADLINE",
@@ -10,15 +10,17 @@ SACCT_FAILED = (
     "REVOKED",
     "TIMEOUT",
 )
-SACCT_RUNNING = (
+SCONTROL_RUNNING = (
     "PENDING",
     "PREEMPTED",
     "RUNNING",
     "REQUEUED",
     "RESIZING",
     "SUSPENDED",
+    "CONFIGURING",
+    "COMPLETING",
 )
-SACCT_FINISHED = SACCT_COMPLETED_OK + SACCT_FAILED
+SCONTROL_FINISHED = SCONTROL_COMPLETED_OK + SCONTROL_FAILED
 
 ######### SBATCH OPTIONS ##############
 # Dictionary: slurm option: (need user input?, slurm argument, with '=' if necessary)
@@ -74,4 +76,5 @@ SLURM_OPTS = {
     "WRAP": (True, "--wrap="),
     "EXCLUDE": (True, "--exclude="),
     "ARRAY": (True, "--array="),
+    "ACCOUNT": (True, "--account="),
 }

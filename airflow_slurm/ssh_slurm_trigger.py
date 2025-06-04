@@ -14,26 +14,25 @@
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
 import asyncio
+import logging
+from collections import Counter
 from typing import Any
+from typing import Iterable
 
-import asyncssh
 from airflow.exceptions import AirflowException
-from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow.triggers.base import BaseTrigger
 from airflow.triggers.base import TriggerEvent
 
-# Use this to hide asyncssh connections logs
-asyncssh.set_log_level("WARN")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
-def parse_scontrol(input: str) -> dict:
-    d = dict()
-    for i in input.split():
-        key_value_pair = i.split("=")
-        k = key_value_pair[0]
-        v = "=".join(key_value_pair[1:])
-        d[k] = v
-    return d
+def parse_scontrol_record(line):
+    out = {}
+    for kv in line.split():
+        k, v = kv.split("=", maxsplit=1)
+        out[k] = v
+    return out
 
 
 class SSHSlurmTrigger(BaseTrigger):
@@ -47,20 +46,13 @@ class SSHSlurmTrigger(BaseTrigger):
     ):
         """
         :param jobid: the slurm's job id
-        :param last_known_state: the last known slurm's state (see mycompany.operators.ssh_slurm_operator.SACCT_*)
+        :param last_known_state: the last known slurm's state
         :param last_known_log_lines: how many lines did the log have IN TOTAL the last time we opened it?
-        :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & SACCT
+        :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & scontrol
         """
         super().__init__()
         self.jobid = jobid
         self.ssh_conn_id = ssh_conn_id
-        self.ssh_hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
-        self.ssh_opt = asyncssh.SSHClientConnectionOptions(
-            username=self.ssh_hook.username,
-            port=self.ssh_hook.port,
-            client_keys=self.ssh_hook.key_file,
-            known_hosts=None,
-        )
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
@@ -78,52 +70,94 @@ class SSHSlurmTrigger(BaseTrigger):
         )
 
     async def get_scontrol_output(self) -> dict | None:
-        """With the job id we look at what state it is in the slurm using
-        scontrol. In some cases we may find that the job still does not appear.
-        In this case, we will retry later up to 3 times.
+        proc = await asyncio.create_subprocess_shell(
+            f"bash -l -c 'scontrol -o show job {self.jobid}'",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
 
-        :return: a dictionary with job information or None if we haven't
-            found the job
-        """
-        # async with asyncssh.connect(
-        #     host=self.ssh_hook.remote_host, options=self.ssh_opt
-        # ) as conn:
-        #     result = await conn.run(
-        #         f"bash -l -c 'scontrol show job {self.jobid}'"
-        #     )
-        with self.ssh_hook.get_conn() as client:
-            stdin, stdout, stderr = client.exec_command(
-                f"bash -l -c 'scontrol show job {self.jobid}'"
+        stdout, stderr = await proc.communicate()
+        output = stdout.decode().strip()
+        error = stderr.decode().strip()
+        exit_code = proc.returncode
+
+        if exit_code == 0:
+            if not output:
+                if self.scontrol_try > 2:
+                    raise AirflowException(
+                        "scontrol didn't return any job information"
+                    )
+                else:
+                    self.scontrol_try += 1
+                    return
+
+            array_status, records = await self.parse_scontrol(
+                output.splitlines()
             )
-            stdin.channel.shutdown_write()
-            output = stdout.read().decode().strip()
-            error = stderr.read().decode().strip()
-            exit_code = stdout.channel.recv_exit_status()
+
+            out = records[self.jobid.strip()]
+            out["JobState"] = array_status
+            return {
+                "job_id": out["JobId"],
+                "job_name": out["JobName"],
+                "state": out["JobState"],
+                "reason": out["Reason"],
+                "log_out": out["StdOut"],
+                "log_err": out["StdErr"],
+            }
+        else:
+            raise AirflowException(f"scontrol returned {exit_code=}\n{error=}")
+
+    async def parse_scontrol(
+        self, scontrol_output: Iterable[str], cancel_pending: bool = True
+    ) -> tuple[str, dict[str, dict[str, str]]]:
+        """Parse `scontrol` output for single job or job array.
+
+        Parse the output of `scontrol`. A global status is determined for job
+        arrays, such that if any job is failed the global state is failed, too.
+
+        Args:
+            scontrol_output: The output of `scontrol`, already split into
+                individual lines.
+            cancel_pending: If True, remaining jobs in a failed job array are
+                cancelled.
+
+        Returns:
+            global_state
+            record_dict: A dictionary of job id to job record
+        """
+        records = tuple(parse_scontrol_record(line) for line in scontrol_output)
+        record_dict = {r["JobId"]: r for r in records}
+        state_counter = Counter(r["JobState"] for r in records)
+        if state_counter.get("FAILED", False):
+            if cancel_pending:
+                await self.cancel_remaining_jobs(records)
+            return "FAILED", record_dict
+        if state_counter.get("PENDING", 0) > 0:
+            return "PENDING", record_dict
+        if state_counter.get("RUNNING", 0):
+            return "RUNNING", record_dict
+        if state_counter.get("COMPLETED", 0) == len(records):
+            return "COMPLETED", record_dict
+        print(state_counter)
+
+    async def cancel_remaining_jobs(self, records):
+        ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
+        logger.error(f"Cancelling pending jobs of failed array: {ids}")
+        proc = await asyncio.create_subprocess_shell(
+            f"bash -l -c 'scancel {' '.join(ids)}'",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        output = stdout.decode().strip()
+        error = stderr.decode().strip()
+        exit_code = proc.returncode
 
         if exit_code != 0:
-            raise AirflowException(
-                f"SCONTROL returned a non-zero exit code: {error}"
-            )
-
-        if not output:
-            if self.sacct_try > 2:
-                raise AirflowException(
-                    "SCONTROL didn't return any job information"
-                )
-            else:
-                self.sacct_try += 1
-                return
-
-        sl_out = parse_scontrol(output)
-
-        return {
-            "job_id": sl_out["JobId"],
-            "job_name": sl_out["JobName"],
-            "state": sl_out["JobState"],
-            "reason": sl_out["Reason"],
-            "log_out": sl_out["StdOut"],
-            "log_err": sl_out["StdErr"],
-        }
+            raise AirflowException(f"scontrol returned {exit_code=}\n{error=}")
+        logger.error(output)
+        logger.error(error)
 
     async def get_log(self, out_file) -> list[str]:
         """We read the log from the last line we had read to the last complete
@@ -135,12 +169,14 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a list with all lines
         """
         try:
-            async with asyncssh.connect(
-                host=self.ssh_hook.remote_host, options=self.ssh_opt
-            ) as conn:
-                result = await conn.run(f"cat {out_file}")
+            proc = await asyncio.create_subprocess_shell(
+                f"cat {out_file}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
-            log = result.stdout.split("\n")
+            stdout, _ = await proc.communicate()
+            log = stdout.decode().strip().split("\n")
             if not isinstance(log, list):
                 raise TypeError(
                     f"Expected 'log' to be of type 'list', but got {type(log)}"
@@ -171,10 +207,10 @@ class SSHSlurmTrigger(BaseTrigger):
     async def run(self):
         """The function that runs when we do a defer of the SlurmOperator."""
         # How many attempts do we have to read the job information and the log?
-        # In some cases, the log file and information in sacct take a while to appear
+        # In some cases, the log file and information in scontrol take a while to appear
         # We allow 3 attempts at each thing before failing / showing an error
         self.log_try = 0
-        self.sacct_try = 0
+        self.scontrol_try = 0
 
         while True:
             await asyncio.sleep(self.tdelta_between_pokes)
@@ -185,7 +221,7 @@ class SSHSlurmTrigger(BaseTrigger):
             self.log.debug(f"{slurm_job=} \n {slurm_log=}")
 
             if slurm_job:
-                # In some cases we do not have the information in the sacct instantly, we will try again from here
+                # In some cases we do not have the information in the scontrol instantly, we will try again from here
                 # self.tdelta_between_pokes seconds
 
                 slurm_changed_state = (

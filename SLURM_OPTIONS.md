@@ -16,6 +16,9 @@ This document lists all the available keys that can be used in the `slurm_option
 - **`PARTITION`**: Define the partition (queue) to submit the job to.
   - Example: `--partition=batch`
 
+- **`ACCOUNT`**: Define the account that submits the job.
+  - Example: `--account=account_name`
+
 - **`TIME`**: Set the maximum wall time for the job.
   - Example: `--time=01:00:00` (1 hour)
 
