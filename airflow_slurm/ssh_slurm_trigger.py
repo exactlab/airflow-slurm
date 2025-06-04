@@ -52,6 +52,7 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         super().__init__()
         self.jobid = jobid
+        self.ssh_conn_id = ssh_conn_id
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
