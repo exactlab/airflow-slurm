@@ -145,7 +145,7 @@ class SSHSlurmTrigger(BaseTrigger):
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
         logger.error(f"Cancelling pending jobs of failed array: {ids}")
         proc = await asyncio.create_subprocess_shell(
-            f"bash -l -c 'scancel {' '.join(ids)}",
+            f"bash -l -c 'scancel {' '.join(ids)}'",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
