@@ -77,4 +77,5 @@ SLURM_OPTS = {
     "EXCLUDE": (True, "--exclude="),
     "ARRAY": (True, "--array="),
     "ACCOUNT": (True, "--account="),
+    "QOS": (True, "--qos="),
 }
