@@ -53,6 +53,17 @@ class SSHSlurmTrigger(BaseTrigger):
         super().__init__()
         self.jobid = jobid
         self.ssh_conn_id = ssh_conn_id
+        # FIXME:
+        # Initialising with safe-ish values. This should be improved, e.g.,
+        # by capturing the output of the job submission call.
+        self.last_full_state = {
+            "job_id": jobid,
+            "job_name": "unknown",
+            "state": "unknown",
+            "reason": "unknown",
+            "log_out": "/dev/null",
+            "log_err": "/dev/null",
+        }
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
@@ -84,16 +95,12 @@ class SSHSlurmTrigger(BaseTrigger):
         if exit_code == 0:
             if not output:
                 if self.scontrol_try > 2:
-                    raise AirflowException(
-                        "scontrol didn't return any job information"
-                    )
+                    raise AirflowException("scontrol didn't return any job information")
                 else:
                     self.scontrol_try += 1
                     return
 
-            array_status, records = await self.parse_scontrol(
-                output.splitlines()
-            )
+            array_status, records = await self.parse_scontrol(output.splitlines())
 
             out = records[self.jobid.strip()]
             out["JobState"] = array_status
@@ -107,9 +114,7 @@ class SSHSlurmTrigger(BaseTrigger):
                 "log_err": out["StdErr"],
             }
         else:
-            logger.warning(
-                "scontrol returned %s with error %s.", exit_code, error
-            )
+            logger.warning("scontrol returned %s with error %s.", exit_code, error)
             try:
                 proc = await asyncio.create_subprocess_shell(
                     f"bash --login -c 'sacct --noheader -j {self.jobid}'",
@@ -121,9 +126,7 @@ class SSHSlurmTrigger(BaseTrigger):
                 if exit_code != 0:
                     error = stderr.decode().strip()
                     logger.warning(error)
-                    raise RuntimeError(
-                        "sacct returned %s: %s", exit_code, error
-                    )
+                    raise RuntimeError("sacct returned %s: %s", exit_code, error)
                 output = stdout.decode().strip().splitlines()
                 is_completed = all("COMPLETED" in line for line in output)
             except RuntimeError:
@@ -136,9 +139,7 @@ class SSHSlurmTrigger(BaseTrigger):
             if is_completed:
                 out["state"] = "COMPLETED"
             else:
-                raise RuntimeError(
-                    f"Could not determine state of job {self.jobid}"
-                )
+                raise RuntimeError(f"Could not determine state of job {self.jobid}")
             return out
 
     async def parse_scontrol(
@@ -258,9 +259,7 @@ class SSHSlurmTrigger(BaseTrigger):
                 # In some cases we do not have the information in the scontrol instantly, we will try again from here
                 # self.tdelta_between_pokes seconds
 
-                slurm_changed_state = (
-                    slurm_job["state"] != self.last_known_state
-                )
+                slurm_changed_state = slurm_job["state"] != self.last_known_state
                 self.last_known_state = slurm_job["state"]
 
                 if slurm_log or slurm_changed_state:
