@@ -100,7 +100,8 @@ class SSHSlurmOperator(BaseOperator):
             if key in SLURM_OPTS:
                 has_value, opt_string = SLURM_OPTS[key]
                 if has_value:
-                    slurm_opts[key] = f"{opt_string}{value}"
+                    if value is not None:
+                        slurm_opts[key] = f"{opt_string}{value}"
                 else:
                     slurm_opts[key] = opt_string
 
