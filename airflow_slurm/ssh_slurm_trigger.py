@@ -71,7 +71,7 @@ class SSHSlurmTrigger(BaseTrigger):
 
     async def get_scontrol_output(self) -> dict | None:
         proc = await asyncio.create_subprocess_shell(
-            f"bash -l -c 'scontrol -o show job {self.jobid}'",
+            f"bash --login -c 'scontrol --oneliner show job {self.jobid}'",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -97,6 +97,7 @@ class SSHSlurmTrigger(BaseTrigger):
 
             out = records[self.jobid.strip()]
             out["JobState"] = array_status
+            self.last_full_state = out
             return {
                 "job_id": out["JobId"],
                 "job_name": out["JobName"],
@@ -106,7 +107,39 @@ class SSHSlurmTrigger(BaseTrigger):
                 "log_err": out["StdErr"],
             }
         else:
-            raise AirflowException(f"scontrol returned {exit_code=}\n{error=}")
+            logger.warning(
+                "scontrol returned %s with error %s.", exit_code, error
+            )
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    f"bash --login -c 'sacct --noheader -j {self.jobid}'",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                exit_code = proc.returncode
+                stdout, stderr = await proc.communicate()
+                if exit_code != 0:
+                    error = stderr.decode().strip()
+                    logger.warning(error)
+                    raise RuntimeError(
+                        "sacct returned %s: %s", exit_code, error
+                    )
+                output = stdout.decode().strip().splitlines()
+                is_completed = all("COMPLETED" in line for line in output)
+            except RuntimeError:
+                logger.warning(
+                    "Could not infer job state from running "
+                    "scontrol and sacct. Assuming completed."
+                )
+                is_completed = True
+            out = dict(**self.last_full_state)
+            if is_completed:
+                out["state"] = "COMPLETED"
+            else:
+                raise RuntimeError(
+                    f"Could not determine state of job {self.jobid}"
+                )
+            return out
 
     async def parse_scontrol(
         self, scontrol_output: Iterable[str], cancel_pending: bool = True
@@ -145,7 +178,7 @@ class SSHSlurmTrigger(BaseTrigger):
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
         logger.error(f"Cancelling pending jobs of failed array: {ids}")
         proc = await asyncio.create_subprocess_shell(
-            f"bash -l -c 'scancel {' '.join(ids)}'",
+            f"bash --login -c 'scancel {' '.join(ids)}'",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
