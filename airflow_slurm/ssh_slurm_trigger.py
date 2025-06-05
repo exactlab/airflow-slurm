@@ -162,6 +162,7 @@ class SSHSlurmTrigger(BaseTrigger):
         records = tuple(parse_scontrol_record(line) for line in scontrol_output)
         record_dict = {r["JobId"]: r for r in records}
         state_counter = Counter(r["JobState"] for r in records)
+        logger.info("States: %s", state_counter)
         if state_counter.get("FAILED", False):
             if cancel_pending:
                 await self.cancel_remaining_jobs(records)
