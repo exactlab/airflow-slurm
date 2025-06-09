@@ -176,7 +176,9 @@ class SSHSlurmTrigger(BaseTrigger):
         elif state_counter.get("COMPLETED", 0) == len(records):
             return "COMPLETED", record_dict
         else:
-            return "UNKNOWN", record_dict
+            # extract one of the (state, count) pairs and return it.
+            _state_count = state_counter.popitem()
+            return _state_count[0], record_dict
 
     async def cancel_remaining_jobs(self, records):
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
