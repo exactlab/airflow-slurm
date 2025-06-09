@@ -92,7 +92,7 @@ class SSHSlurmTrigger(BaseTrigger):
         error = stderr.decode().strip()
         exit_code = proc.returncode
 
-        if exit_code == 0:
+        if exit_code == 0 and len(output) > 0:
             if not output:
                 if self.scontrol_try > 2:
                     raise AirflowException("scontrol didn't return any job information")
@@ -115,6 +115,7 @@ class SSHSlurmTrigger(BaseTrigger):
             }
         else:
             logger.warning("scontrol returned %s with error %s.", exit_code, error)
+            logger.warning("scontrol output", output)
             try:
                 proc = await asyncio.create_subprocess_shell(
                     f"bash --login -c 'sacct --noheader -j {self.jobid}'",
@@ -168,13 +169,14 @@ class SSHSlurmTrigger(BaseTrigger):
             if cancel_pending:
                 await self.cancel_remaining_jobs(records)
             return "FAILED", record_dict
-        if state_counter.get("PENDING", 0) > 0:
+        elif state_counter.get("PENDING", 0) > 0:
             return "PENDING", record_dict
-        if state_counter.get("RUNNING", 0):
+        elif state_counter.get("RUNNING", 0):
             return "RUNNING", record_dict
-        if state_counter.get("COMPLETED", 0) == len(records):
+        elif state_counter.get("COMPLETED", 0) == len(records):
             return "COMPLETED", record_dict
-        print(state_counter)
+        else:
+            return "UNKNOWN", record_dict
 
     async def cancel_remaining_jobs(self, records):
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
