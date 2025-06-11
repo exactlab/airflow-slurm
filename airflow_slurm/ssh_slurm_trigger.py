@@ -43,6 +43,7 @@ class SSHSlurmTrigger(BaseTrigger):
         last_known_state: str | None = None,
         last_known_log_lines: int = 0,
         tdelta_between_pokes: int = 20,
+        **kwargs,
     ):
         """
         :param jobid: the slurm's job id
