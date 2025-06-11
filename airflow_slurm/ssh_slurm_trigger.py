@@ -73,6 +73,7 @@ class SSHSlurmTrigger(BaseTrigger):
             "airflow_slurm.ssh_slurm_trigger.SSHSlurmTrigger",
             {
                 "job_id": self.jobid,
+                "jobid": self.jobid,
                 "ssh_conn_id": self.ssh_conn_id,
                 "last_known_state": self.last_known_state,
                 "last_known_log_lines": self.last_known_log_lines,
