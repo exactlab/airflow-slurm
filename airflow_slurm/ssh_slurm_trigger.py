@@ -196,9 +196,9 @@ class SSHSlurmTrigger(BaseTrigger):
         exit_code = proc.returncode
 
         if exit_code != 0:
-            raise AirflowException(f"scontrol returned {exit_code=}\n{error=}")
-        logger.error(output)
-        logger.error(error)
+            logger.error(f"Could not cancel jobs: {exit_code=}")
+            logger.error(f"Error: {error}")
+            logger.error(f"Output: {output}")
 
     async def get_log(self, out_file) -> list[str]:
         """We read the log from the last line we had read to the last complete
