@@ -84,6 +84,11 @@ This document lists all the available keys that can be used in the `slurm_option
 - **`KILL_ON_INVALID_DEP`**: Terminate the job if its dependencies are invalid.
   - Example: `--kill-on-invalid-dep=true`
 
+- **`MEM`**: Specify the real memory required per node. Default units are megabytes. Different units can be specified using the suffix [K|M|G|T].
+  - Example: `--mem=8G`
+- **`MEM_PER_CPU`**: Minimum memory required per usable allocated CPU. Default units are megabytes. The --mem, --mem-per-cpu and --mem-per-gpu options are mutually exclusive. If --mem, --mem-per-cpu or --mem-per-gpu are specified as command line arguments, then they will take precedence over the environment.
+  - Example: `--mem-per-cpu=2G`
+
 ### Mail and User Options
 
 - **`LICENSES`**: Request specific licenses for the job.
