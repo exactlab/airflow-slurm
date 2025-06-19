@@ -78,4 +78,6 @@ SLURM_OPTS = {
     "ARRAY": (True, "--array="),
     "ACCOUNT": (True, "--account="),
     "QOS": (True, "--qos="),
+    "MEM": (True, "--mem="),
+    "MEM_PER_CPU": (True, "--mem-per-cpu="),
 }
