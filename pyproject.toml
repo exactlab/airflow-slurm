@@ -1,20 +1,29 @@
-[tool.poetry]
+[project]
 name = "airflow-slurm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Airflow operator for slurm"
-authors = ["Andrea Recchia <andrea.recchia@exact-lab.it>"]
 readme = "README.md"
+authors = [
+    { name = "Andrea Recchia", email = "andrea.recchia@exact-lab.it" },
+    { name = "Jacopo Nespolo", email = "jacopo.nespolo@exact-lab.it" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "apache-airflow>=3.0.3",
+    "apache-airflow-providers-ssh>=4.1.1",
+    "jinja2>=3.1.6",
+    "python-dateutil>=2.9.0.post0",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.13"
-apache-airflow = {extras = ["async"], version = "^2.10.2"}
-apache-airflow-providers-ssh = "^3.13.1"
-python-dateutil = "^2.9.0.post0"
-jinja2 = "^3.1.4"
-
-[tool.poetry.group.dev.dependencies]
-deptry = "^0.20.0"
+[project.scripts]
+airflow-slurm = "airflow_slurm:main"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "deptry>=0.23.0",
+    "jinja2>=3.1.6",
+]
