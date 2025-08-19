@@ -22,7 +22,6 @@ from airflow.exceptions import AirflowException
 from airflow.exceptions import AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
 from airflow.utils.context import Context
-from airflow.utils.operator_helpers import context_to_airflow_vars
 
 from airflow_slurm.constants import SCONTROL_COMPLETED_OK
 from airflow_slurm.constants import SCONTROL_FAILED
@@ -84,12 +83,8 @@ class SSHSlurmOperator(BaseOperator):
         """
 
         # Mangle job name with submission date
-        airflow_context_vars = context_to_airflow_vars(
-            context, in_env_var_format=True
-        )
-        job_date = dateutil.parser.isoparse(
-            airflow_context_vars["AIRFLOW_CTX_EXECUTION_DATE"]
-        ).strftime("%Y%m%dT%H%M")
+        logical_date = context.get("logical_date") or context.get("execution_date")
+        job_date = logical_date.strftime("%Y%m%dT%H%M")
         self.slurm_options["JOB_NAME"] = (
             f'{self.slurm_options.get("JOB_NAME", "airflow_slurm_job")}_{job_date}'
         )
