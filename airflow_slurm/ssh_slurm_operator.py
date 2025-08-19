@@ -124,7 +124,7 @@ class SSHSlurmOperator(BaseOperator):
             self.log.info(f"Running script:\n{slurm_script}")
 
             process = subprocess.Popen(  # nosec
-                ["bash", "-l", "-c", "sbatch --parsable"],
+                ["bash", "-l", "-c", "sbatch", "--parsable"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
