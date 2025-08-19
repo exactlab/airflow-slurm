@@ -116,6 +116,18 @@ class SSHSlurmOperator(BaseOperator):
     def execute(self, context: Context):
         """The function that is executed when we call this operator."""
 
+        def extract_job_id(sbatch_output: bytes) -> str:
+            sbatch_output = sbatch_output.decode("utf-8")
+            if sbatch_output.strip().isdigit():
+                return sbatch_output.strip()
+            elif sbatch_output.split()[-1].isdigit():
+                return sbatch_output.split()[-1]
+            else:
+                raise AirflowException(
+                    "Could not determine job id "
+                    f"from SBATCH output: {sbatch_output}"
+                )
+
         slurm_script = self.parse_input_and_render_slurm_script(context)
 
         self.check_job_not_running(context)
@@ -137,20 +149,18 @@ class SSHSlurmOperator(BaseOperator):
 
             if exit_code != 0:
                 raise AirflowException(
-                    f"SBATCH command failed. The command returned a non-zero exit code {exit_code}, "
+                    "SBATCH command failed. "
+                    f"The command returned {exit_code=}, "
                     f"with output {output} and error {error}"
                 )
-            elif not str(output).strip().isdigit():
-                raise AirflowException(
-                    f"SBATCH command did not return a job id: {output}"
-                )
 
-            self.log.info(f"Submitted batch job {output.strip()}")
+            job_id = extract_job_id(output)
+            self.log.info(f"Submitted batch job {job_id}")
 
             # Defer execution for the SLURM trigger
             self.defer(
                 trigger=SSHSlurmTrigger(
-                    output,
+                    job_id,
                     ssh_conn_id=self.ssh_conn_id,
                     tdelta_between_pokes=self.tdelta_between_checks,
                 ),
