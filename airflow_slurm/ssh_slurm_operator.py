@@ -1,47 +1,41 @@
-# This program is free software: you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by
-# the Free Software Foundation, version 3 of the License.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-# See the GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
-# Original Copyright @ecodina and Michele Mastropietro
-# Modified by Andrea Recchia, 2024
-# Licence: GPLv3
+from __future__ import annotations
+
+import re
+import shlex
 import subprocess  # nosec
-from typing import Any
-from typing import Sequence
+from typing import Any, Sequence
 
 import dateutil.parser
-from airflow.exceptions import AirflowException
-from airflow.exceptions import AirflowSkipException
+from airflow.exceptions import AirflowException, AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
-from airflow.utils.context import Context
-from airflow.utils.operator_helpers import context_to_airflow_vars
-
-from airflow_slurm.constants import SCONTROL_COMPLETED_OK
-from airflow_slurm.constants import SCONTROL_FAILED
-from airflow_slurm.constants import SCONTROL_FINISHED
-from airflow_slurm.constants import SCONTROL_RUNNING
-from airflow_slurm.constants import SLURM_OPTS
+from airflow.hooks.base import BaseHook
 from airflow_slurm.ssh_slurm_trigger import SSHSlurmTrigger
 from airflow_slurm.templates import SLURM_FILE
 
+import uuid
+from airflow.utils.context import Context
+from airflow.sdk.definitions.context import Context
+
+from airflow_slurm.constants import (
+    SCONTROL_COMPLETED_OK,
+    SCONTROL_FAILED,
+    SCONTROL_FINISHED,
+    SCONTROL_RUNNING,
+    SLURM_OPTS,
+)
+
+# optional: only needed when ssh_conn_id is set
+try:
+    from airflow.providers.ssh.hooks.ssh import SSHHook
+except Exception:
+    SSHHook = None  # type: ignore
+
 
 class SSHSlurmOperator(BaseOperator):
-    r"""Run a linux script or command through Slurm.
+    """Run a linux script or command through Slurm (local or via SSH).
 
-    :param command: the command or path to the script to be executed. Allow use of jinja
-    :param slurm_options: other parameters we'll pass to SBATCH because it doesn't accept working with variables
-        of environment To see the list: SLURM_OPTS dictionary of this file
-    :param tdelta_between_checks: how many seconds do we check scontrol to know the status of the job?
-
-    If do_xcom_push = True, the last line of the subprocess will be written to XCom
+    If `ssh_conn_id` is provided, commands are executed on the remote host using
+    the Airflow SSH connection. Otherwise, they run locally.
     """
 
     template_fields: Sequence[str] = (
@@ -58,8 +52,6 @@ class SSHSlurmOperator(BaseOperator):
         self,
         *,
         command: str,
-        # TODO: this is useless at this point,
-        # I'll leave it here to avoid breaking changes
         ssh_conn_id: str,
         tdelta_between_checks: int = 5,
         slurm_options: dict[str, Any] | None = None,
@@ -70,32 +62,38 @@ class SSHSlurmOperator(BaseOperator):
         super().__init__(**kwargs)
         self.command = command
         self.ssh_conn_id = ssh_conn_id
-        self.slurm_options = slurm_options
-        self.tdelta_between_checks = tdelta_between_checks
+        self.slurm_options: dict[str, Any] = slurm_options or {}
+        self.tdelta_between_checks = int(tdelta_between_checks)
         self.modules = modules
         self.setup_commands = setup_commands
 
+        self._use_ssh = bool(self.ssh_conn_id)
+        if self._use_ssh and SSHHook is None:
+            raise AirflowException(
+                "SSH provider not installed. Install apache-airflow-providers-ssh."
+            )
+
+    # ----------------------------- helpers ----------------------------- #
+    def _render_job_name(self, context: Context) -> str:
+        job_name = self.slurm_options.get("JOB_NAME", "airflow_slurm_job")
+        try:
+            logical_date = context["logical_date"]
+        except Exception:
+            airflow_ctx = context.get("airflow.ctx", {})  # type: ignore
+            if "AIRFLOW_CTX_EXECUTION_DATE" in airflow_ctx:
+                logical_date = dateutil.parser.isoparse(
+                    airflow_ctx["AIRFLOW_CTX_EXECUTION_DATE"]
+                )
+            else:
+                logical_date = None
+        if logical_date is not None:
+            suffix = logical_date.strftime("%Y%m%dT%H%M")
+            return f"{job_name}_{suffix}"
+        return job_name
+
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
-        """Render the SLURM script using the Jinja2 template and the operator's
-        context.
-
-        :param context: Airflow context
-        :return: Rendered SLURM script as a string
-        """
-
-        # Mangle job name with submission date
-        airflow_context_vars = context_to_airflow_vars(
-            context, in_env_var_format=True
-        )
-        job_date = dateutil.parser.isoparse(
-            airflow_context_vars["AIRFLOW_CTX_EXECUTION_DATE"]
-        ).strftime("%Y%m%dT%H%M")
-        self.slurm_options["JOB_NAME"] = (
-            f'{self.slurm_options.get("JOB_NAME", "airflow_slurm_job")}_{job_date}'
-        )
-
-        # Process slurm options
-        slurm_opts = {}
+        self.slurm_options["JOB_NAME"] = self._render_job_name(context)
+        slurm_opts: dict[str, str] = {}
         for key, value in self.slurm_options.items():
             if key in SLURM_OPTS:
                 has_value, opt_string = SLURM_OPTS[key]
@@ -105,173 +103,224 @@ class SSHSlurmOperator(BaseOperator):
                 else:
                     slurm_opts[key] = opt_string
 
-        slurm_script = SLURM_FILE.render(
+        return SLURM_FILE.render(
             slurm_opts=slurm_opts,
             job_command=self.command,
             modules=self.modules,
             setup_commands=self.setup_commands,
         )
-        return slurm_script
 
+
+    def _build_ssh_params(self) -> dict | None:
+        if not self._use_ssh:
+            return None
+        conn = BaseHook.get_connection(self.ssh_conn_id)
+        extras = conn.extra_dejson or {}
+
+        key_file   = extras.get("key_file") or extras.get("keyfile")
+        private_key = extras.get("private_key")
+        passphrase  = extras.get("private_key_passphrase") or extras.get("passphrase")
+
+        if not private_key and key_file:
+            try:
+                with open(key_file, "r") as f:
+                    private_key = f.read()
+            except Exception:
+                private_key = None  # fall back to password
+
+        return {
+            "hostname": conn.host,
+            "port": conn.port or 22,
+            "username": conn.login,
+            "password": conn.password,
+            "private_key": private_key,               # PEM string or None
+            "private_key_passphrase": passphrase,     # optional
+        }
+
+    def _ssh_exec(self, command: str) -> tuple[int, str, str]:
+        """Run a command on the remote host via SSHHook."""
+        assert SSHHook is not None
+        hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
+        client = hook.get_conn()
+        try:
+            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+            out = stdout.read().decode()
+            err = stderr.read().decode()
+            rc = stdout.channel.recv_exit_status()
+            return rc, out, err
+        finally:
+            client.close()
+
+    def _ssh_upload(self, content: str, remote_path: str) -> None:
+        assert SSHHook is not None
+        hook = SSHHook(ssh_conn_id=self.ssh_conn_id)
+        client = hook.get_conn()
+        try:
+            sftp = client.open_sftp()
+            try:
+                with sftp.file(remote_path, "w") as f:
+                    f.write(content)
+            finally:
+                sftp.close()
+        finally:
+            client.close()
+
+    # ------------------------------ run ------------------------------- #
     def execute(self, context: Context):
-        """The function that is executed when we call this operator."""
-
-        def extract_job_id(sbatch_output: bytes) -> str:
-            sbatch_output = sbatch_output.decode("utf-8")
-            if sbatch_output.strip().isdigit():
-                return sbatch_output.strip()
-            elif sbatch_output.split()[-1].isdigit():
-                return sbatch_output.split()[-1]
-            else:
+        """Submit the job with sbatch (local or remote) and defer to trigger."""
+        def extract_job_id(sbatch_output: str) -> str:
+            m = re.search(r"\b(\d+)\b", sbatch_output)
+            if not m:
                 raise AirflowException(
-                    "Could not determine job id "
-                    f"from SBATCH output: {sbatch_output}"
+                    f"Could not determine job id from SBATCH output: {sbatch_output!r}"
                 )
+            return m.group(1)
 
         slurm_script = self.parse_input_and_render_slurm_script(context)
 
+        # Skip if duplicate job name already queued/running
         self.check_job_not_running(context)
 
-        try:
-            self.log.info(f"Running script:\n{slurm_script}")
+        if self._use_ssh:
+            # Upload script to remote /tmp and submit with sbatch
+            remote_path = f"/tmp/airflow-slurm-{uuid.uuid4().hex}.sh"
+            self._ssh_upload(slurm_script, remote_path)
 
-            process = subprocess.Popen(  # nosec
-                ["bash", "-l", "-c", "sbatch", "--parsable"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            output, error = process.communicate(input=slurm_script)
-            exit_code = process.returncode
+            cmd = f"bash -lc 'sbatch --parsable {shlex.quote(remote_path)}'"
+            self.log.info("Submitting remote SLURM job: %s", cmd)
+            rc, out, err = self._ssh_exec(cmd)
 
-            self.log.debug(f"{output}")
+            # best-effort cleanup
+            self._ssh_exec(f"rm -f {shlex.quote(remote_path)}")
 
-            if exit_code != 0:
+            if rc != 0:
                 raise AirflowException(
-                    "SBATCH command failed. "
-                    f"The command returned {exit_code=}, "
-                    f"with output {output} and error {error}"
+                    f"Remote sbatch failed: rc={rc}, stdout={out!r}, stderr={err!r}"
                 )
 
-            job_id = extract_job_id(output)
-            self.log.info(f"Submitted batch job {job_id}")
-
-            # Defer execution for the SLURM trigger
-            self.defer(
-                trigger=SSHSlurmTrigger(
-                    job_id,
-                    ssh_conn_id=self.ssh_conn_id,
-                    tdelta_between_pokes=self.tdelta_between_checks,
-                ),
-                method_name="new_slurm_state_log",
+            job_id = extract_job_id(out.strip())
+        else:
+            # Local submission (stdin to sbatch)
+            cmd = "sbatch --parsable"
+            self.log.info("Submitting local SLURM job: %s", cmd)
+            proc = subprocess.run(  # nosec
+                ["bash", "-l", "-c", cmd],
+                input=slurm_script,
+                text=True,
+                capture_output=True,
+                check=False,
             )
+            if proc.returncode != 0:
+                raise AirflowException(
+                    "SBATCH command failed. "
+                    f"returncode={proc.returncode}, stdout={proc.stdout!r}, stderr={proc.stderr!r}"
+                )
+            job_id = extract_job_id(proc.stdout.strip())
 
-        except Exception as e:
-            raise AirflowException(f"Error running sbatch: {e}")
+        self.log.info("Submitted batch job %s", job_id)
 
-    def check_job_not_running(self, context):
-        """Check that there is no job in the slurm with the current execution
-        date (hour and minute). If so, skips the current task.
+        # Defer to trigger (it will also run remote if ssh_conn_id is set)
+        self.defer(
+            trigger=SSHSlurmTrigger(
+                job_id=job_id,
+                ssh_conn_id=self.ssh_conn_id if self._use_ssh else "",
+                use_ssh=self._use_ssh,
+                tdelta_between_pokes=self.tdelta_between_checks,
+                ssh_params=self._build_ssh_params(),
+            ),
+            method_name="new_slurm_state_log",
+        )
 
-        In case the user passes, through the dag_config (--config / UI)
-        the parameter "ignore_multiple_jobs"=true, we run the task
-        anyway.
 
-        :param context:
-        :return:
-        """
-        if context["params"].get("ignore_multiple_jobs", False):
+    # ---------------------------- utilities --------------------------- #
+    def check_job_not_running(self, context: Context) -> None:
+        params = context.get("params", {}) or {}
+        if params.get("ignore_multiple_jobs", False):
             self.log.info(
-                f"Ignoring if there are multiple slurm jobs submitted with the same job name ({self.slurm_options['JOB_NAME']})"
+                "Ignoring duplicate-job check for %s",
+                self.slurm_options.get("JOB_NAME"),
             )
             return
 
-        self.log.info(
-            f"Checking if job {self.slurm_options['JOB_NAME']} is already running..."
-        )
+        job_name = self.slurm_options.get("JOB_NAME")
+        if not job_name:
+            return
+        quoted_name = shlex.quote(job_name)
+        cmd = f"bash -lc 'squeue -n {quoted_name} -h -o %i'"
 
-        command = (
-            f"bash -l -c 'squeue -n {self.slurm_options['JOB_NAME']} -h -o %i'"
-        )
-        process = subprocess.run(
-            command,
-            shell=True,  # nosec
-            capture_output=True,
-            text=True,
-        )
-
-        stdout = process.stdout
-        stderr = process.stderr
-        exit_code = process.returncode
-
-        # Log and handle errors
-        if exit_code > 0:
-            raise AirflowException(
-                f"Command execution failed. Exit code: {exit_code}. Error output: {stderr.strip()}"
+        if self._use_ssh:
+            rc, out, err = self._ssh_exec(cmd)
+            if rc != 0:
+                raise AirflowException(f"squeue (remote) failed: {err.strip()!r}")
+            stdout = out.strip()
+        else:
+            proc = subprocess.run(  # nosec
+                ["bash", "-l", "-c", f"squeue -n {quoted_name} -h -o %i"],
+                text=True, capture_output=True, check=False
             )
+            if proc.returncode != 0:
+                raise AirflowException(
+                    f"squeue (local) failed: {proc.stderr.strip()!r}"
+                )
+            stdout = proc.stdout.strip()
 
-        self.log.info(f"squeue stdout:\n{stdout.strip()}")
-
-        if len(stdout.split()) > 0:
+        self.log.info("squeue stdout (same-name jobs):\n%s", stdout)
+        if stdout.split():
             raise AirflowSkipException(
-                "According to SQUEUE this job is already running for this date!"
+                "According to squeue this job is already running for this date!"
             )
 
-    def new_slurm_state_log(self, context, event: dict[str, Any] = None):
-        """It is the function that SSHSlurmTrigger calls when there has been a
-        state change in the SLURM or there are new lines in the file of log.
+    def new_slurm_state_log(self, context: Context, event: dict[str, Any] | None = None):
+        if not event:
+            raise AirflowException("Missing trigger event")
 
-        :param context: some airflow variables
-        :param event: {"slurm_job": {"job_id": str: "job_name": str:
-            "state": str, "reason": str}, "slurm_changed_state: bool,
-            "log_number_lines": int, # those that the log has in total,
-            it is not len(event["log_new_lines"]) "log_new_lines":
-            List[str]}
-        :return:
-        """
         if (
-            event["slurm_changed_state"]
+            event.get("slurm_changed_state")
             and event["slurm_job"]["state"] not in SCONTROL_FINISHED
         ):
-            # This is ugly and repetitive, but this way the command stays in the log!
             self._log_status_change(event)
 
-        if event["log_new_lines"]:
-            for line in event["log_new_lines"]:
-                self.log.info(line.rstrip())
+        for line in event.get("log_new_lines", []) or []:
+            self.log.info(line.rstrip())
 
-        if event["slurm_job"]["state"] in SCONTROL_COMPLETED_OK:
-            if event["slurm_changed_state"]:
+        state = event["slurm_job"]["state"]
+        if state in SCONTROL_COMPLETED_OK:
+            if event.get("slurm_changed_state"):
                 self._log_status_change(event)
             return None
-        elif event["slurm_job"]["state"] in SCONTROL_FAILED:
-            if event["slurm_changed_state"]:
+        elif state in SCONTROL_FAILED:
+            if event.get("slurm_changed_state"):
                 self._log_status_change(event)
             raise AirflowException("Slurm job failed!")
-        elif event["slurm_job"]["state"] in SCONTROL_RUNNING:
+        elif state in SCONTROL_RUNNING:
             self.defer(
                 trigger=SSHSlurmTrigger(
-                    event["slurm_job"]["job_id"],
-                    ssh_conn_id=self.ssh_conn_id,
-                    last_known_state=event["slurm_job"]["state"],
-                    last_known_log_lines=event["log_number_lines"],
+                    job_id=event["slurm_job"]["job_id"],
+                    ssh_conn_id=self.ssh_conn_id if self._use_ssh else "",
+                    use_ssh=self._use_ssh,
+                    last_known_state=state,
+                    last_known_log_lines=event.get("log_number_lines", 0),
                     tdelta_between_pokes=self.tdelta_between_checks,
+                    ssh_params=self._build_ssh_params(),
                 ),
                 method_name="new_slurm_state_log",
             )
         else:
             raise AirflowException(
-                f"scontrol returned an unknown state for job #{event['slurm_job']['job_id']}: "
-                f"{event['slurm_job']['state']}"
+                "scontrol returned an unknown state for job #{}: {}".format(
+                    event["slurm_job"]["job_id"], state
+                )
             )
 
-    def _log_status_change(self, event: dict[str, Any]):
+    def _log_status_change(self, event: dict[str, Any]) -> None:
         self.log.info(
-            f"Slurm reports job #{event['slurm_job']['job_id']} ({event['slurm_job']['job_name']}) has "
-            f"changed its state to {event['slurm_job']['state']} "
-            f"with reason {event['slurm_job']['reason']}"
+            "Slurm reports job #%s (%s) changed state to %s with reason %s",
+            event["slurm_job"]["job_id"],
+            event["slurm_job"]["job_name"],
+            event["slurm_job"]["state"],
+            event["slurm_job"].get("reason"),
         )
 
     def on_kill(self) -> None:
         pass
+
