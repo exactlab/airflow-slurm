@@ -39,6 +39,7 @@ class SSHSlurmOperator(BaseOperator):
     :param slurm_options: other parameters we'll pass to SBATCH because it doesn't accept working with variables
         of environment To see the list: SLURM_OPTS dictionary of this file
     :param tdelta_between_checks: how many seconds do we check scontrol to know the status of the job?
+    :param do_xcom_push: if True, the last line of the job output will be pushed to XCom when job completes
 
     If do_xcom_push = True, the last line of the subprocess will be written to XCom
     """
@@ -64,6 +65,7 @@ class SSHSlurmOperator(BaseOperator):
         slurm_options: dict[str, Any] | None = None,
         modules: list[str] | None = None,
         setup_commands: list[str] | None = None,
+        do_xcom_push: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -73,6 +75,7 @@ class SSHSlurmOperator(BaseOperator):
         self.tdelta_between_checks = tdelta_between_checks
         self.modules = modules
         self.setup_commands = setup_commands
+        self.do_xcom_push = do_xcom_push
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """Render the SLURM script using the Jinja2 template and the operator's
@@ -213,6 +216,28 @@ class SSHSlurmOperator(BaseOperator):
                 "According to SQUEUE this job is already running for this date!"
             )
 
+    def _get_last_line_from_output(self, output_file: str) -> str | None:
+        """Extract the last line from the SLURM job output file.
+        
+        :param output_file: Path to the SLURM output file
+        :return: Last line or None if file doesn't exist
+        """
+        try:
+            process = subprocess.run(
+                ["tail", "-n1", output_file],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            
+            if process.returncode == 0:
+                return process.stdout.strip()
+                
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+            self.log.warning(f"Failed to read output file {output_file}: {e}")
+        
+        return None
+
     def new_slurm_state_log(self, context, event: dict[str, Any] = None):
         """It is the function that SSHSlurmTrigger calls when there has been a
         state change in the SLURM or there are new lines in the file of log.
@@ -239,6 +264,16 @@ class SSHSlurmOperator(BaseOperator):
         if event["slurm_job"]["state"] in SCONTROL_COMPLETED_OK:
             if event["slurm_changed_state"]:
                 self._log_status_change(event)
+            
+            # Push last line to XCom if requested
+            if self.do_xcom_push and "slurm_job" in event:
+                output_file = event["slurm_job"].get("log_out")
+                if output_file and output_file != "/dev/null":
+                    last_line = self._get_last_line_from_output(output_file)
+                    if last_line:
+                        self.log.info(f"Pushing to XCom: {last_line}")
+                        context["task_instance"].xcom_push(key="return_value", value=last_line)
+            
             return None
         elif event["slurm_job"]["state"] in SCONTROL_FAILED:
             if event["slurm_changed_state"]:
