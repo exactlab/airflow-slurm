@@ -14,22 +14,22 @@
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
 import subprocess  # nosec
-from typing import Any
-from typing import Sequence
+from typing import Any, Sequence
 
-from airflow.exceptions import AirflowException
-from airflow.exceptions import AirflowSkipException
+from airflow.exceptions import AirflowException, AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
 from airflow.utils.context import Context
 
-from airflow_slurm.constants import SCONTROL_COMPLETED_OK
-from airflow_slurm.constants import SCONTROL_FAILED
-from airflow_slurm.constants import SCONTROL_FINISHED
-from airflow_slurm.constants import SCONTROL_RUNNING
-from airflow_slurm.constants import SLURM_OPTS
-from airflow_slurm.ssh_slurm_trigger import SSHSlurmTrigger
-from airflow_slurm.ssh_utils import get_ssh_connection_details
-from airflow_slurm.templates import SLURM_FILE
+from .constants import (
+    SCONTROL_COMPLETED_OK,
+    SCONTROL_FAILED,
+    SCONTROL_FINISHED,
+    SCONTROL_RUNNING,
+    SLURM_OPTS,
+)
+from .ssh_slurm_trigger import SSHSlurmTrigger
+from .ssh_utils import get_ssh_connection_details
+from .templates import SLURM_FILE
 
 
 class SSHSlurmOperator(BaseOperator):
@@ -77,83 +77,94 @@ class SSHSlurmOperator(BaseOperator):
         self.setup_commands = setup_commands
         self.do_xcom_push = do_xcom_push
 
-
     def _build_ssh_command(self, remote_command: list[str]) -> list[str]:
         """Build SSH command by prefixing with ssh invocation.
-        
+
         Args:
             remote_command: Command to execute on remote host
-            
+
         Returns:
             Complete SSH command list ready for subprocess
         """
         host, username, port = get_ssh_connection_details(self.ssh_conn_id)
-        
+
         user_host = f"{username}@{host}" if username else host
-        
+
         ssh_cmd = ["ssh"]
         if port != 22:
             ssh_cmd.extend(["-p", str(port)])
-        
-        ssh_cmd.extend([
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no", 
-            user_host
-        ])
-        
+
+        ssh_cmd.extend(
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                user_host,
+            ]
+        )
+
         if isinstance(remote_command, str):
             ssh_cmd.append(remote_command)
         else:
             ssh_cmd.extend(remote_command)
-            
+
         return ssh_cmd
 
     def _execute_ssh_command(
-        self, 
-        remote_command: list[str] | str, 
+        self,
+        remote_command: list[str] | str,
         input_data: str | None = None,
-        timeout: int = 60
+        timeout: int = 60,
     ) -> tuple[int, str, str]:
         """Execute command via SSH with proper error handling.
-        
+
         Args:
             remote_command: Command to execute on remote host
             input_data: Optional input to pass to command stdin
             timeout: Command timeout in seconds
-            
+
         Returns:
             Tuple of (exit_code, stdout, stderr)
         """
         ssh_cmd = self._build_ssh_command(remote_command)
-        
+
         try:
             process = subprocess.run(
                 ssh_cmd,
                 input=input_data,
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
             )
             return process.returncode, process.stdout, process.stderr
-            
+
         except subprocess.TimeoutExpired:
-            raise AirflowException(f"SSH command timed out after {timeout} seconds: {ssh_cmd}")
+            raise AirflowException(
+                f"SSH command timed out after {timeout} seconds: {ssh_cmd}"
+            )
         except subprocess.SubprocessError as e:
             raise AirflowException(f"SSH command failed: {e}")
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
-        """Render the SLURM script using the Jinja2 template and the operator's
-        context.
+        """Render the SLURM script using the Jinja2 template.
 
-        :param context: Airflow context
-        :return: Rendered SLURM script as a string
+        Uses the operator's context to render the Jinja2 template with
+        appropriate variables.
+
+        Args:
+            context: Airflow context containing execution information.
+
+        Returns:
+            Rendered SLURM script as a string.
         """
-
         # Mangle job name with submission date
-        logical_date = context.get("logical_date") or context.get("execution_date")
+        logical_date = context.get("logical_date") or context.get(
+            "execution_date"
+        )
         job_date = logical_date.strftime("%Y%m%dT%H%M")
         self.slurm_options["JOB_NAME"] = (
-            f'{self.slurm_options.get("JOB_NAME", "airflow_slurm_job")}_{job_date}'
+            f"{self.slurm_options.get('JOB_NAME', 'airflow_slurm_job')}_{job_date}"
         )
 
         # Process slurm options
@@ -197,9 +208,7 @@ class SSHSlurmOperator(BaseOperator):
             self.log.info(f"Running script:\n{slurm_script}")
 
             exit_code, output, error = self._execute_ssh_command(
-                ["sbatch", "--parsable"],
-                input_data=slurm_script,
-                timeout=120
+                ["sbatch", "--parsable"], input_data=slurm_script, timeout=120
             )
 
             self.log.debug(f"{output}")
@@ -228,15 +237,15 @@ class SSHSlurmOperator(BaseOperator):
             raise AirflowException(f"Error running sbatch: {e}")
 
     def check_job_not_running(self, context):
-        """Check that there is no job in the slurm with the current execution
-        date (hour and minute). If so, skips the current task.
+        """Check that there is no job running with the current execution date.
 
-        In case the user passes, through the dag_config (--config / UI)
-        the parameter "ignore_multiple_jobs"=true, we run the task
-        anyway.
+        Checks if there is a job in SLURM with the current execution date
+        (hour and minute). If so, skips the current task. If the user passes
+        the parameter "ignore_multiple_jobs"=true through dag_config
+        (--config / UI), the task runs anyway.
 
-        :param context:
-        :return:
+        Args:
+            context: Airflow context containing execution information.
         """
         if context["params"].get("ignore_multiple_jobs", False):
             self.log.info(
@@ -250,8 +259,14 @@ class SSHSlurmOperator(BaseOperator):
 
         exit_code, stdout, stderr = self._execute_ssh_command(
             # NOTE: --noheader removes column headers, --format=%i returns only job IDs for clean parsing
-            ["squeue", "--name", self.slurm_options['JOB_NAME'], "--noheader", "--format=%i"],
-            timeout=30
+            [
+                "squeue",
+                "--name",
+                self.slurm_options["JOB_NAME"],
+                "--noheader",
+                "--format=%i",
+            ],
+            timeout=30,
         )
 
         # Log and handle errors
@@ -274,30 +289,33 @@ class SSHSlurmOperator(BaseOperator):
         :return: Last line or None if file doesn't exist
         """
         try:
-            exit_code, stdout, stderr = self._execute_ssh_command(
-                ["tail", "-n1", output_file],
-                timeout=10
+            exit_code, stdout, _stderr = self._execute_ssh_command(
+                ["tail", "-n1", output_file], timeout=10
             )
 
             if exit_code == 0:
                 return stdout.strip()
 
         except AirflowException as e:
-            self.log.warning(f"Failed to read remote output file {output_file} via SSH: {e}")
+            self.log.warning(
+                f"Failed to read remote output file {output_file} via SSH: {e}"
+            )
 
         return None
 
     def new_slurm_state_log(self, context, event: dict[str, Any] = None):
-        """It is the function that SSHSlurmTrigger calls when there has been a
-        state change in the SLURM or there are new lines in the file of log.
+        """Handle SLURM state changes and log updates.
 
-        :param context: some airflow variables
-        :param event: {"slurm_job": {"job_id": str: "job_name": str:
-            "state": str, "reason": str}, "slurm_changed_state: bool,
-            "log_number_lines": int, # those that the log has in total,
-            it is not len(event["log_new_lines"]) "log_new_lines":
-            List[str]}
-        :return:
+        Called by SSHSlurmTrigger when there has been a state change in SLURM
+        or there are new lines in the log file.
+
+        Args:
+            context: Airflow variables and execution context.
+            event: Dictionary containing SLURM job information with keys:
+                - slurm_job: Dict with job_id, job_name, state, reason
+                - slurm_changed_state: Boolean indicating state change
+                - log_number_lines: Total lines in log
+                - log_new_lines: List of new log lines
         """
         if (
             event["slurm_changed_state"]
@@ -321,7 +339,9 @@ class SSHSlurmOperator(BaseOperator):
                     last_line = self._get_last_line_from_output(output_file)
                     if last_line:
                         self.log.info(f"Pushing to XCom: {last_line}")
-                        context["task_instance"].xcom_push(key="return_value", value=last_line)
+                        context["task_instance"].xcom_push(
+                            key="return_value", value=last_line
+                        )
 
             return None
         elif event["slurm_job"]["state"] in SCONTROL_FAILED:
@@ -353,4 +373,8 @@ class SSHSlurmOperator(BaseOperator):
         )
 
     def on_kill(self) -> None:
+        """Handle task termination.
+
+        Called when the task is killed or cancelled.
+        """
         pass

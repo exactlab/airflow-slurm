@@ -16,15 +16,13 @@
 import asyncio
 import logging
 from collections import Counter
-from typing import Any
-from typing import Iterable
+from typing import Any, Iterable
 
 import asyncssh
 from airflow.exceptions import AirflowException
-from airflow.triggers.base import BaseTrigger
-from airflow.triggers.base import TriggerEvent
+from airflow.triggers.base import BaseTrigger, TriggerEvent
 
-from airflow_slurm.ssh_utils import get_ssh_connection_details
+from .ssh_utils import get_ssh_connection_details
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -48,8 +46,8 @@ class SSHSlurmTrigger(BaseTrigger):
         tdelta_between_pokes: int = 20,
         **kwargs,
     ):
-        """
-        :param jobid: the slurm's job id
+        """:param jobid: the slurm's job id
+
         :param last_known_state: the last known slurm's state
         :param last_known_log_lines: how many lines did the log have IN TOTAL the last time we opened it?
         :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & scontrol
@@ -73,6 +71,11 @@ class SSHSlurmTrigger(BaseTrigger):
         self.tdelta_between_pokes = tdelta_between_pokes
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
+        """Serialize the trigger for Airflow.
+
+        Returns:
+            Tuple containing the trigger class path and initialization parameters.
+        """
         return (
             "airflow_slurm.ssh_slurm_trigger.SSHSlurmTrigger",
             {
@@ -85,54 +88,66 @@ class SSHSlurmTrigger(BaseTrigger):
             },
         )
 
-    async def _execute_ssh_command(self, command: list[str] | str, timeout: int = 60) -> tuple[int, str, str]:
+    async def _execute_ssh_command(
+        self, command: list[str] | str, timeout: int = 60
+    ) -> tuple[int, str, str]:
         """Execute command via SSH using asyncssh.
-        
+
         Args:
             command: Command to execute on remote host
             timeout: Command timeout in seconds
-            
+
         Returns:
             Tuple of (exit_code, stdout, stderr)
         """
         host, username, port = get_ssh_connection_details(self.ssh_conn_id)
-        
+
         try:
             async with asyncssh.connect(
                 host,
                 username=username,
                 port=port,
                 known_hosts=None,  # Disable host key checking for automation
-                client_keys=None   # Use SSH agent
+                client_keys=None,  # Use SSH agent
             ) as conn:
                 if isinstance(command, list):
                     command_str = " ".join(command)
                 else:
                     command_str = command
-                    
+
                 result = await conn.run(command_str, timeout=timeout)
                 return result.exit_status, result.stdout, result.stderr
-                
+
         except asyncssh.Error as e:
             raise AirflowException(f"SSH connection failed: {e}")
         except asyncio.TimeoutError:
-            raise AirflowException(f"SSH command timed out after {timeout} seconds")
+            raise AirflowException(
+                f"SSH command timed out after {timeout} seconds"
+            )
 
     async def get_scontrol_output(self) -> dict | None:
+        """Get SLURM job status using scontrol command.
+
+        Returns:
+            Dictionary containing job information or None if not found.
+        """
         exit_code, output, error = await self._execute_ssh_command(
-            ["scontrol", "--oneliner", "show", "job", self.jobid],
-            timeout=30
+            ["scontrol", "--oneliner", "show", "job", self.jobid], timeout=30
         )
 
         if exit_code == 0 and len(output) > 0:
             if not output:
                 if self.scontrol_try > 2:
-                    raise AirflowException("scontrol didn't return any job information")
+                    raise AirflowException(
+                        "scontrol didn't return any job information"
+                    )
                 else:
                     self.scontrol_try += 1
                     return
 
-            array_status, records = await self.parse_scontrol(output.splitlines())
+            array_status, records = await self.parse_scontrol(
+                output.splitlines()
+            )
 
             out = records[self.jobid.strip()]
             out["JobState"] = array_status
@@ -146,16 +161,19 @@ class SSHSlurmTrigger(BaseTrigger):
                 "log_err": out["StdErr"],
             }
         else:
-            logger.warning("scontrol returned %s with error %s.", exit_code, error)
+            logger.warning(
+                "scontrol returned %s with error %s.", exit_code, error
+            )
             logger.warning("scontrol output", output)
             try:
                 exit_code, stdout, stderr = await self._execute_ssh_command(
-                    ["sacct", "--noheader", "-j", self.jobid],
-                    timeout=30
+                    ["sacct", "--noheader", "-j", self.jobid], timeout=30
                 )
                 if exit_code != 0:
                     logger.warning(stderr)
-                    raise RuntimeError("sacct returned %s: %s", exit_code, stderr)
+                    raise RuntimeError(
+                        "sacct returned %s: %s", exit_code, stderr
+                    )
                 output = stdout.strip().splitlines()
                 is_completed = all("COMPLETED" in line for line in output)
             except RuntimeError:
@@ -168,7 +186,9 @@ class SSHSlurmTrigger(BaseTrigger):
             if is_completed:
                 out["state"] = "COMPLETED"
             else:
-                raise RuntimeError(f"Could not determine state of job {self.jobid}")
+                raise RuntimeError(
+                    f"Could not determine state of job {self.jobid}"
+                )
             return out
 
     async def parse_scontrol(
@@ -189,7 +209,9 @@ class SSHSlurmTrigger(BaseTrigger):
             global_state
             record_dict: A dictionary of job id to job record
         """
-        records = tuple(parse_scontrol_record(line) for line in scontrol_output)
+        records = tuple(
+            parse_scontrol_record(line) for line in scontrol_output
+        )
         record_dict = {r["JobId"]: r for r in records}
         state_counter = Counter(r["JobState"] for r in records)
         logger.info("States: %s", state_counter)
@@ -209,13 +231,17 @@ class SSHSlurmTrigger(BaseTrigger):
             return _state_count[0], record_dict
 
     async def cancel_remaining_jobs(self, records):
+        """Cancel remaining SLURM jobs that are not failed.
+
+        Args:
+            records: List of job records from SLURM.
+        """
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
         logger.error(f"Cancelling pending jobs of failed array: {ids}")
-        
+
         # NOTE: scancel accepts multiple job IDs as separate arguments
         exit_code, output, error = await self._execute_ssh_command(
-            ["scancel"] + list(ids),
-            timeout=30
+            ["scancel"] + list(ids), timeout=30
         )
 
         if exit_code != 0:
@@ -224,18 +250,23 @@ class SSHSlurmTrigger(BaseTrigger):
             logger.error(f"Output: {output}")
 
     async def get_log(self, out_file) -> list[str]:
-        """We read the log from the last line we had read to the last complete
-        line (that has \n at the end). In some cases, the file takes a while to
-        appear. We will try 3 times. From then on, the Trigger will call the
-        SlurmOperator and a line will be added to the Airflow log warning that
-        the Slurm log does not exist.
+        r"""Read log from the last known position to the last complete line.
 
-        :return: a list with all lines
+        Reads the log from the last line we had read to the last complete
+        line (that has \n at the end). In some cases, the file takes a while
+        to appear. We will try 3 times. From then on, the Trigger will call
+        the SlurmOperator and a line will be added to the Airflow log warning
+        that the Slurm log does not exist.
+
+        Args:
+            out_file: Path to the output file to read.
+
+        Returns:
+            List of all new lines from the log file.
         """
         try:
             exit_code, stdout, stderr = await self._execute_ssh_command(
-                ["cat", out_file],
-                timeout=10
+                ["cat", out_file], timeout=10
             )
 
             if exit_code != 0:
@@ -289,7 +320,9 @@ class SSHSlurmTrigger(BaseTrigger):
                 # In some cases we do not have the information in the scontrol instantly, we will try again from here
                 # self.tdelta_between_pokes seconds
 
-                slurm_changed_state = slurm_job["state"] != self.last_known_state
+                slurm_changed_state = (
+                    slurm_job["state"] != self.last_known_state
+                )
                 self.last_known_state = slurm_job["state"]
 
                 if slurm_log or slurm_changed_state:
