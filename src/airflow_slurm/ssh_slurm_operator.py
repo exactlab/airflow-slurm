@@ -17,7 +17,6 @@ import subprocess  # nosec
 from typing import Any
 from typing import Sequence
 
-import dateutil.parser
 from airflow.exceptions import AirflowException
 from airflow.exceptions import AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
@@ -134,7 +133,7 @@ class SSHSlurmOperator(BaseOperator):
             self.log.info(f"Running script:\n{slurm_script}")
 
             process = subprocess.Popen(  # nosec
-                ["bash", "-l", "-c", "sbatch", "--parsable"],
+                ["bash", "--login", "-c", "sbatch", "--parsable"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -218,7 +217,7 @@ class SSHSlurmOperator(BaseOperator):
 
     def _get_last_line_from_output(self, output_file: str) -> str | None:
         """Extract the last line from the SLURM job output file.
-        
+
         :param output_file: Path to the SLURM output file
         :return: Last line or None if file doesn't exist
         """
@@ -229,13 +228,13 @@ class SSHSlurmOperator(BaseOperator):
                 text=True,
                 timeout=10,
             )
-            
+
             if process.returncode == 0:
                 return process.stdout.strip()
-                
+
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             self.log.warning(f"Failed to read output file {output_file}: {e}")
-        
+
         return None
 
     def new_slurm_state_log(self, context, event: dict[str, Any] = None):
@@ -264,7 +263,7 @@ class SSHSlurmOperator(BaseOperator):
         if event["slurm_job"]["state"] in SCONTROL_COMPLETED_OK:
             if event["slurm_changed_state"]:
                 self._log_status_change(event)
-            
+
             # Push last line to XCom if requested
             if self.do_xcom_push and "slurm_job" in event:
                 output_file = event["slurm_job"].get("log_out")
@@ -273,7 +272,7 @@ class SSHSlurmOperator(BaseOperator):
                     if last_line:
                         self.log.info(f"Pushing to XCom: {last_line}")
                         context["task_instance"].xcom_push(key="return_value", value=last_line)
-            
+
             return None
         elif event["slurm_job"]["state"] in SCONTROL_FAILED:
             if event["slurm_changed_state"]:
