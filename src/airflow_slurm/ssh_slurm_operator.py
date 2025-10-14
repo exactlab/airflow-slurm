@@ -19,7 +19,6 @@ from typing import Sequence
 
 from airflow.exceptions import AirflowException
 from airflow.exceptions import AirflowSkipException
-from airflow.hooks.base import BaseHook
 from airflow.models.baseoperator import BaseOperator
 from airflow.utils.context import Context
 
@@ -29,6 +28,7 @@ from airflow_slurm.constants import SCONTROL_FINISHED
 from airflow_slurm.constants import SCONTROL_RUNNING
 from airflow_slurm.constants import SLURM_OPTS
 from airflow_slurm.ssh_slurm_trigger import SSHSlurmTrigger
+from airflow_slurm.ssh_utils import get_ssh_connection_details
 from airflow_slurm.templates import SLURM_FILE
 
 
@@ -77,24 +77,6 @@ class SSHSlurmOperator(BaseOperator):
         self.setup_commands = setup_commands
         self.do_xcom_push = do_xcom_push
 
-    def _get_ssh_connection_details(self) -> tuple[str, int]:
-        """Extract SSH connection details from ssh_conn_id.
-        
-        Returns:
-            Tuple of (user@host, port) for SSH connection
-        """
-        if not self.ssh_conn_id:
-            raise AirflowException("ssh_conn_id is required for SSH operations")
-            
-        connection = BaseHook.get_connection(self.ssh_conn_id)
-        
-        if not connection.host:
-            raise AirflowException(f"Host not specified in connection {self.ssh_conn_id}")
-            
-        user_host = f"{connection.login}@{connection.host}" if connection.login else connection.host
-        port = connection.port or 22
-        
-        return user_host, port
 
     def _build_ssh_command(self, remote_command: list[str]) -> list[str]:
         """Build SSH command by prefixing with ssh invocation.
@@ -105,7 +87,9 @@ class SSHSlurmOperator(BaseOperator):
         Returns:
             Complete SSH command list ready for subprocess
         """
-        user_host, port = self._get_ssh_connection_details()
+        host, username, port = get_ssh_connection_details(self.ssh_conn_id)
+        
+        user_host = f"{username}@{host}" if username else host
         
         ssh_cmd = ["ssh"]
         if port != 22:
@@ -194,8 +178,7 @@ class SSHSlurmOperator(BaseOperator):
     def execute(self, context: Context):
         """The function that is executed when we call this operator."""
 
-        def extract_job_id(sbatch_output: bytes) -> str:
-            sbatch_output = sbatch_output.decode("utf-8")
+        def extract_job_id(sbatch_output: str) -> str:
             if sbatch_output.strip().isdigit():
                 return sbatch_output.strip()
             elif sbatch_output.split()[-1].isdigit():
@@ -213,15 +196,11 @@ class SSHSlurmOperator(BaseOperator):
         try:
             self.log.info(f"Running script:\n{slurm_script}")
 
-            process = subprocess.Popen(  # nosec
-                ["bash", "--login", "-c", "sbatch", "--parsable"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+            exit_code, output, error = self._execute_ssh_command(
+                ["sbatch", "--parsable"],
+                input_data=slurm_script,
+                timeout=120
             )
-            output, error = process.communicate(input=slurm_script)
-            exit_code = process.returncode
 
             self.log.debug(f"{output}")
 
@@ -269,19 +248,11 @@ class SSHSlurmOperator(BaseOperator):
             f"Checking if job {self.slurm_options['JOB_NAME']} is already running..."
         )
 
-        command = (
-            f"bash -l -c 'squeue -n {self.slurm_options['JOB_NAME']} -h -o %i'"
+        exit_code, stdout, stderr = self._execute_ssh_command(
+            # NOTE: --noheader removes column headers, --format=%i returns only job IDs for clean parsing
+            ["squeue", "--name", self.slurm_options['JOB_NAME'], "--noheader", "--format=%i"],
+            timeout=30
         )
-        process = subprocess.run(
-            command,
-            shell=True,  # nosec
-            capture_output=True,
-            text=True,
-        )
-
-        stdout = process.stdout
-        stderr = process.stderr
-        exit_code = process.returncode
 
         # Log and handle errors
         if exit_code > 0:
@@ -303,18 +274,16 @@ class SSHSlurmOperator(BaseOperator):
         :return: Last line or None if file doesn't exist
         """
         try:
-            process = subprocess.run(
+            exit_code, stdout, stderr = self._execute_ssh_command(
                 ["tail", "-n1", output_file],
-                capture_output=True,
-                text=True,
-                timeout=10,
+                timeout=10
             )
 
-            if process.returncode == 0:
-                return process.stdout.strip()
+            if exit_code == 0:
+                return stdout.strip()
 
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            self.log.warning(f"Failed to read output file {output_file}: {e}")
+        except AirflowException as e:
+            self.log.warning(f"Failed to read remote output file {output_file} via SSH: {e}")
 
         return None
 

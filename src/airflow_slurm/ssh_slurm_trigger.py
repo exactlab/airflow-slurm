@@ -19,9 +19,12 @@ from collections import Counter
 from typing import Any
 from typing import Iterable
 
+import asyncssh
 from airflow.exceptions import AirflowException
 from airflow.triggers.base import BaseTrigger
 from airflow.triggers.base import TriggerEvent
+
+from airflow_slurm.ssh_utils import get_ssh_connection_details
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -82,17 +85,44 @@ class SSHSlurmTrigger(BaseTrigger):
             },
         )
 
-    async def get_scontrol_output(self) -> dict | None:
-        proc = await asyncio.create_subprocess_shell(
-            f"bash --login -c 'scontrol --oneliner show job {self.jobid}'",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    async def _execute_ssh_command(self, command: list[str] | str, timeout: int = 60) -> tuple[int, str, str]:
+        """Execute command via SSH using asyncssh.
+        
+        Args:
+            command: Command to execute on remote host
+            timeout: Command timeout in seconds
+            
+        Returns:
+            Tuple of (exit_code, stdout, stderr)
+        """
+        host, username, port = get_ssh_connection_details(self.ssh_conn_id)
+        
+        try:
+            async with asyncssh.connect(
+                host,
+                username=username,
+                port=port,
+                known_hosts=None,  # Disable host key checking for automation
+                client_keys=None   # Use SSH agent
+            ) as conn:
+                if isinstance(command, list):
+                    command_str = " ".join(command)
+                else:
+                    command_str = command
+                    
+                result = await conn.run(command_str, timeout=timeout)
+                return result.exit_status, result.stdout, result.stderr
+                
+        except asyncssh.Error as e:
+            raise AirflowException(f"SSH connection failed: {e}")
+        except asyncio.TimeoutError:
+            raise AirflowException(f"SSH command timed out after {timeout} seconds")
 
-        stdout, stderr = await proc.communicate()
-        output = stdout.decode().strip()
-        error = stderr.decode().strip()
-        exit_code = proc.returncode
+    async def get_scontrol_output(self) -> dict | None:
+        exit_code, output, error = await self._execute_ssh_command(
+            ["scontrol", "--oneliner", "show", "job", self.jobid],
+            timeout=30
+        )
 
         if exit_code == 0 and len(output) > 0:
             if not output:
@@ -119,18 +149,14 @@ class SSHSlurmTrigger(BaseTrigger):
             logger.warning("scontrol returned %s with error %s.", exit_code, error)
             logger.warning("scontrol output", output)
             try:
-                proc = await asyncio.create_subprocess_shell(
-                    f"bash --login -c 'sacct --noheader -j {self.jobid}'",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                exit_code, stdout, stderr = await self._execute_ssh_command(
+                    ["sacct", "--noheader", "-j", self.jobid],
+                    timeout=30
                 )
-                exit_code = proc.returncode
-                stdout, stderr = await proc.communicate()
                 if exit_code != 0:
-                    error = stderr.decode().strip()
-                    logger.warning(error)
-                    raise RuntimeError("sacct returned %s: %s", exit_code, error)
-                output = stdout.decode().strip().splitlines()
+                    logger.warning(stderr)
+                    raise RuntimeError("sacct returned %s: %s", exit_code, stderr)
+                output = stdout.strip().splitlines()
                 is_completed = all("COMPLETED" in line for line in output)
             except RuntimeError:
                 logger.warning(
@@ -185,15 +211,12 @@ class SSHSlurmTrigger(BaseTrigger):
     async def cancel_remaining_jobs(self, records):
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
         logger.error(f"Cancelling pending jobs of failed array: {ids}")
-        proc = await asyncio.create_subprocess_shell(
-            f"bash --login -c 'scancel {' '.join(ids)}'",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        
+        # NOTE: scancel accepts multiple job IDs as separate arguments
+        exit_code, output, error = await self._execute_ssh_command(
+            ["scancel"] + list(ids),
+            timeout=30
         )
-        stdout, stderr = await proc.communicate()
-        output = stdout.decode().strip()
-        error = stderr.decode().strip()
-        exit_code = proc.returncode
 
         if exit_code != 0:
             logger.error(f"Could not cancel jobs: {exit_code=}")
@@ -210,14 +233,15 @@ class SSHSlurmTrigger(BaseTrigger):
         :return: a list with all lines
         """
         try:
-            proc = await asyncio.create_subprocess_shell(
-                f"cat {out_file}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            exit_code, stdout, stderr = await self._execute_ssh_command(
+                ["cat", out_file],
+                timeout=10
             )
 
-            stdout, _ = await proc.communicate()
-            log = stdout.decode().strip().split("\n")
+            if exit_code != 0:
+                raise Exception(f"Failed to read remote file: {stderr}")
+
+            log = stdout.strip().split("\n")
             if not isinstance(log, list):
                 raise TypeError(
                     f"Expected 'log' to be of type 'list', but got {type(log)}"
