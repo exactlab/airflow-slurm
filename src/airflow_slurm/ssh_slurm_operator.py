@@ -19,6 +19,7 @@ from typing import Sequence
 
 from airflow.exceptions import AirflowException
 from airflow.exceptions import AirflowSkipException
+from airflow.hooks.base import BaseHook
 from airflow.models.baseoperator import BaseOperator
 from airflow.utils.context import Context
 
@@ -75,6 +76,86 @@ class SSHSlurmOperator(BaseOperator):
         self.modules = modules
         self.setup_commands = setup_commands
         self.do_xcom_push = do_xcom_push
+
+    def _get_ssh_connection_details(self) -> tuple[str, int]:
+        """Extract SSH connection details from ssh_conn_id.
+        
+        Returns:
+            Tuple of (user@host, port) for SSH connection
+        """
+        if not self.ssh_conn_id:
+            raise AirflowException("ssh_conn_id is required for SSH operations")
+            
+        connection = BaseHook.get_connection(self.ssh_conn_id)
+        
+        if not connection.host:
+            raise AirflowException(f"Host not specified in connection {self.ssh_conn_id}")
+            
+        user_host = f"{connection.login}@{connection.host}" if connection.login else connection.host
+        port = connection.port or 22
+        
+        return user_host, port
+
+    def _build_ssh_command(self, remote_command: list[str]) -> list[str]:
+        """Build SSH command by prefixing with ssh invocation.
+        
+        Args:
+            remote_command: Command to execute on remote host
+            
+        Returns:
+            Complete SSH command list ready for subprocess
+        """
+        user_host, port = self._get_ssh_connection_details()
+        
+        ssh_cmd = ["ssh"]
+        if port != 22:
+            ssh_cmd.extend(["-p", str(port)])
+        
+        ssh_cmd.extend([
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=no", 
+            user_host
+        ])
+        
+        if isinstance(remote_command, str):
+            ssh_cmd.append(remote_command)
+        else:
+            ssh_cmd.extend(remote_command)
+            
+        return ssh_cmd
+
+    def _execute_ssh_command(
+        self, 
+        remote_command: list[str] | str, 
+        input_data: str | None = None,
+        timeout: int = 60
+    ) -> tuple[int, str, str]:
+        """Execute command via SSH with proper error handling.
+        
+        Args:
+            remote_command: Command to execute on remote host
+            input_data: Optional input to pass to command stdin
+            timeout: Command timeout in seconds
+            
+        Returns:
+            Tuple of (exit_code, stdout, stderr)
+        """
+        ssh_cmd = self._build_ssh_command(remote_command)
+        
+        try:
+            process = subprocess.run(
+                ssh_cmd,
+                input=input_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            return process.returncode, process.stdout, process.stderr
+            
+        except subprocess.TimeoutExpired:
+            raise AirflowException(f"SSH command timed out after {timeout} seconds: {ssh_cmd}")
+        except subprocess.SubprocessError as e:
+            raise AirflowException(f"SSH command failed: {e}")
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """Render the SLURM script using the Jinja2 template and the operator's

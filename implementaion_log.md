@@ -61,3 +61,26 @@ available on the Airflow worker and proper SSH agent/key configuration.
 
 
 ## Implementation log
+
+### Step 1: SSH configuration and helper utility
+
+Added SSH infrastructure to SSHSlurmOperator with three helper methods:
+
+- `_get_ssh_connection_details()`: Extracts user@host and port from Airflow's 
+  connection registry using the existing `ssh_conn_id` parameter. Handles missing
+  connection validation and defaults port to 22.
+
+- `_build_ssh_command()`: Constructs SSH command arrays by prefixing remote 
+  commands with `ssh -p <port> -o BatchMode=yes -o StrictHostKeyChecking=no 
+  user@host`. Uses BatchMode to prevent interactive prompts and disables host
+  key checking for automation environments.
+
+- `_execute_ssh_command()`: Wrapper for subprocess.run with SSH command 
+  construction, timeout handling, and standardized error reporting. Returns
+  (exit_code, stdout, stderr) tuple.
+
+**Key design choices**: Used `subprocess.run()` instead of `Popen()` for 
+simpler error handling and timeout support. Added `BatchMode=yes` and 
+`StrictHostKeyChecking=no` SSH options to ensure non-interactive operation
+suitable for automated environments. The approach assumes SSH agent or
+key-based authentication is already configured on the Airflow worker.
