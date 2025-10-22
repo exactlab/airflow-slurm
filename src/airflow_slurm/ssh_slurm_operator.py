@@ -86,13 +86,19 @@ class SSHSlurmOperator(BaseOperator):
         Returns:
             Complete SSH command list ready for subprocess
         """
-        host, username, port = get_ssh_connection_details(self.ssh_conn_id)
+        host, username, port, key_file = get_ssh_connection_details(
+            self.ssh_conn_id
+        )
 
         user_host = f"{username}@{host}" if username else host
 
         ssh_cmd = ["ssh"]
         if port != 22:
             ssh_cmd.extend(["-p", str(port)])
+
+        # Add SSH key file if specified
+        if key_file:
+            ssh_cmd.extend(["-i", key_file])
 
         ssh_cmd.extend(
             [

@@ -131,3 +131,52 @@ connection logic:
 sync subprocess with async trigger methods. Shared SSH connection extraction
 logic between operator and trigger for maintainability. All SLURM commands
 now use consistent command array format with proper argument separation.
+
+
+### Additional steps
+
+#### SSH key file support
+
+Added support for specifying custom SSH private key files via Airflow
+connection extras. This addresses scenarios where the default SSH agent keys
+are insufficient or where specific key files are required for cluster access.
+
+**Problem**: The initial SSH implementation relied solely on SSH agent
+authentication or default key locations. In production environments, specific
+private key files may be required that are not loaded in the SSH agent.
+
+**Solution**: Extended the SSH connection handling to support key file
+specification:
+
+- Modified `get_ssh_connection_details()` in `ssh_utils.py` to extract
+  `key_file` from connection extras and return it as a fourth tuple element:
+  `(host, username, port, key_file)`
+- Updated `_build_ssh_command()` in `SSHSlurmOperator` to add `-i key_file` SSH
+  option when a key file is specified
+- Modified async SSH connection in `SSHSlurmTrigger` to pass
+  `client_keys=key_file` to asyncssh when specified
+
+**Usage**: Users can now specify a custom SSH key by adding JSON to the Airflow
+connection's "Extra" field: ```json {"key_file": "/path/to/private/key"} ```
+
+This change maintains backward compatibility - if no key file is specified, the
+system falls back to SSH agent authentication as before.
+
+#### Async connection handling
+
+Resolved runtime error in triggers caused by mixing sync and async connection
+retrieval. Airflow 3 triggers run in async event loops where sync connection
+methods cause "AsyncToSync in same thread as async event loop" errors.
+
+**Problem**: `BaseHook.get_connection()` is synchronous but triggers execute in
+async contexts, causing runtime exceptions when retrieving SSH connection
+details.
+
+**Solution**: Created async version of connection handling:
+- Added `aget_ssh_connection_details()` in `ssh_utils.py` using async
+  `Connection.get()` from Airflow SDK
+- Updated `SSHSlurmTrigger` to import and use the async version
+- Maintained original sync function for operator usage
+
+This ensures proper async/await patterns in trigger contexts while preserving
+sync operation for operators.

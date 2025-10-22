@@ -22,7 +22,7 @@ import asyncssh
 from airflow.exceptions import AirflowException
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 
-from .ssh_utils import get_ssh_connection_details
+from .ssh_utils import aget_ssh_connection_details
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -100,7 +100,9 @@ class SSHSlurmTrigger(BaseTrigger):
         Returns:
             Tuple of (exit_code, stdout, stderr)
         """
-        host, username, port = get_ssh_connection_details(self.ssh_conn_id)
+        host, username, port, key_file = await aget_ssh_connection_details(
+            self.ssh_conn_id
+        )
 
         try:
             async with asyncssh.connect(
@@ -108,7 +110,9 @@ class SSHSlurmTrigger(BaseTrigger):
                 username=username,
                 port=port,
                 known_hosts=None,  # Disable host key checking for automation
-                client_keys=None,  # Use SSH agent
+                client_keys=key_file
+                if key_file
+                else None,  # Use specified key or SSH agent
             ) as conn:
                 if isinstance(command, list):
                     command_str = " ".join(command)
