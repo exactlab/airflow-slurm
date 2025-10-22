@@ -80,4 +80,5 @@ SLURM_OPTS = {
     "QOS": (True, "--qos="),
     "MEM": (True, "--mem="),
     "MEM_PER_CPU": (True, "--mem-per-cpu="),
+    "GRES": (True, "--gres="),
 }
