@@ -129,6 +129,9 @@ This document lists all the available keys that can be used in the `slurm_option
 - **`PROPAGATE`**: Set propagation of environment variables.
   - Example: `--propagate=env_vars`
 
+- **`GRES`**: Generic Resource scheduling. Used for requesting special hardware resources.
+  - Example: `--gres=gpu:tesla:2,gpu:kepler:2,mps:400,bandwidth:lustre:no_consume:4G`
+
 ### System Options
 
 - **`REBOOT`**: Reboot the system after the job completes.
