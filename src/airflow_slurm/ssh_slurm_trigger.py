@@ -100,19 +100,27 @@ class SSHSlurmTrigger(BaseTrigger):
         Returns:
             Tuple of (exit_code, stdout, stderr)
         """
-        host, username, port, key_file = await aget_ssh_connection_details(
-            self.ssh_conn_id
-        )
+        ssh_args = await aget_ssh_connection_details(self.ssh_conn_id)
+
+        # Build asyncssh connection parameters
+        connect_kwargs = {
+            "known_hosts": None,  # Disable host key checking for automation
+        }
+
+        if ssh_args.key_file:
+            connect_kwargs["client_keys"] = ssh_args.key_file
+
+        if ssh_args.server_host_key_algs:
+            connect_kwargs["server_host_key_algs"] = (
+                ssh_args.server_host_key_algs
+            )
 
         try:
             async with asyncssh.connect(
-                host,
-                username=username,
-                port=port,
-                known_hosts=None,  # Disable host key checking for automation
-                client_keys=key_file
-                if key_file
-                else None,  # Use specified key or SSH agent
+                ssh_args.host,
+                username=ssh_args.username,
+                port=ssh_args.port,
+                **connect_kwargs,
             ) as conn:
                 if isinstance(command, list):
                     command_str = " ".join(command)
