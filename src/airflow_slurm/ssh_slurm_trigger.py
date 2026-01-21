@@ -130,8 +130,6 @@ class SSHSlurmTrigger(BaseTrigger):
                     result = await conn.run(command_str, timeout=timeout)
                     return result.exit_status, result.stdout, result.stderr
 
-            except asyncssh.Error as e:
-                raise AirflowException(f"SSH connection failed: {e}")
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
                     delay = 2 ** (attempt + 1)
@@ -148,8 +146,12 @@ class SSHSlurmTrigger(BaseTrigger):
                 else:
                     raise AirflowException(
                         f"SSH command '{command_str}' timed out after "
-                        f"{timeout} seconds ({max_retries} attempts)"
+                        f"{timeout} seconds and {max_retries} retry attempts"
                     )
+            except asyncssh.Error as e:
+                raise AirflowException(
+                    f"SSH connection failed for command '{command_str}': {e}"
+                )
 
     async def get_scontrol_output(self) -> dict | None:
         """Get SLURM job status using scontrol command.
@@ -157,9 +159,15 @@ class SSHSlurmTrigger(BaseTrigger):
         Returns:
             Dictionary containing job information or None if not found.
         """
-        exit_code, output, error = await self._execute_ssh_command(
-            ["scontrol", "--oneliner", "show", "job", self.jobid]
-        )
+        try:
+            exit_code, output, error = await self._execute_ssh_command(
+                ["scontrol", "--oneliner", "show", "job", self.jobid]
+            )
+        except AirflowException as e:
+            logger.warning(
+                "scontrol command failed: %s. Attempting sacct fallback.", e
+            )
+            exit_code, output, error = -1, "", str(e)
 
         if exit_code == 0 and len(output) > 0:
             if not output:
