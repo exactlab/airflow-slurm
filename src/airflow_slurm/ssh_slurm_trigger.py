@@ -102,9 +102,8 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         ssh_args = await aget_ssh_connection_details(self.ssh_conn_id)
 
-        # Build asyncssh connection parameters
         connect_kwargs = {
-            "known_hosts": None,  # Disable host key checking for automation
+            "known_hosts": None,
         }
 
         if ssh_args.key_file:
@@ -115,27 +114,42 @@ class SSHSlurmTrigger(BaseTrigger):
                 ssh_args.server_host_key_algs
             )
 
-        try:
-            async with asyncssh.connect(
-                ssh_args.host,
-                username=ssh_args.username,
-                port=ssh_args.port,
-                **connect_kwargs,
-            ) as conn:
-                if isinstance(command, list):
-                    command_str = " ".join(command)
+        command_str = (
+            " ".join(command) if isinstance(command, list) else command
+        )
+        max_retries = 5
+
+        for attempt in range(max_retries):
+            try:
+                async with asyncssh.connect(
+                    ssh_args.host,
+                    username=ssh_args.username,
+                    port=ssh_args.port,
+                    **connect_kwargs,
+                ) as conn:
+                    result = await conn.run(command_str, timeout=timeout)
+                    return result.exit_status, result.stdout, result.stderr
+
+            except asyncssh.Error as e:
+                raise AirflowException(f"SSH connection failed: {e}")
+            except asyncio.TimeoutError:
+                if attempt < max_retries - 1:
+                    delay = 2 ** (attempt + 1)
+                    logger.warning(
+                        "SSH command '%s' timed out after %d seconds. "
+                        "Retry %d/%d in %d seconds.",
+                        command_str,
+                        timeout,
+                        attempt + 1,
+                        max_retries - 1,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
                 else:
-                    command_str = command
-
-                result = await conn.run(command_str, timeout=timeout)
-                return result.exit_status, result.stdout, result.stderr
-
-        except asyncssh.Error as e:
-            raise AirflowException(f"SSH connection failed: {e}")
-        except asyncio.TimeoutError:
-            raise AirflowException(
-                f"SSH command timed out after {timeout} seconds"
-            )
+                    raise AirflowException(
+                        f"SSH command '{command_str}' timed out after "
+                        f"{timeout} seconds ({max_retries} attempts)"
+                    )
 
     async def get_scontrol_output(self) -> dict | None:
         """Get SLURM job status using scontrol command.
