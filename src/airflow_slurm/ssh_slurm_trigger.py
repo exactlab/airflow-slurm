@@ -89,7 +89,7 @@ class SSHSlurmTrigger(BaseTrigger):
         )
 
     async def _execute_ssh_command(
-        self, command: list[str] | str, timeout: int = 60
+        self, command: list[str] | str, timeout: int = 10
     ) -> tuple[int, str, str]:
         """Execute command via SSH using asyncssh.
 
@@ -158,7 +158,7 @@ class SSHSlurmTrigger(BaseTrigger):
             Dictionary containing job information or None if not found.
         """
         exit_code, output, error = await self._execute_ssh_command(
-            ["scontrol", "--oneliner", "show", "job", self.jobid], timeout=30
+            ["scontrol", "--oneliner", "show", "job", self.jobid]
         )
 
         if exit_code == 0 and len(output) > 0:
@@ -193,7 +193,7 @@ class SSHSlurmTrigger(BaseTrigger):
             logger.warning("scontrol output", output)
             try:
                 exit_code, stdout, stderr = await self._execute_ssh_command(
-                    ["sacct", "--noheader", "-j", self.jobid], timeout=30
+                    ["sacct", "--noheader", "-j", self.jobid],
                 )
                 if exit_code != 0:
                     logger.warning(stderr)
@@ -267,7 +267,7 @@ class SSHSlurmTrigger(BaseTrigger):
 
         # NOTE: scancel accepts multiple job IDs as separate arguments
         exit_code, output, error = await self._execute_ssh_command(
-            ["scancel"] + list(ids), timeout=30
+            ["scancel"] + list(ids),
         )
 
         if exit_code != 0:
@@ -292,7 +292,7 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         try:
             exit_code, stdout, stderr = await self._execute_ssh_command(
-                ["cat", out_file], timeout=10
+                ["cat", out_file],
             )
 
             if exit_code != 0:
