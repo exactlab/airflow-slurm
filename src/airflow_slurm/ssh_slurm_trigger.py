@@ -179,18 +179,20 @@ class SSHSlurmTrigger(BaseTrigger):
              (allows up to 3 attempts tracked by self.scontrol_try)
            - If fails or returns non-zero exit code: proceed to fallback
 
-        2. Fallback method: Execute `sacct --noheader -j <jobid>`
-           - Used when job has left the active queue (completed/failed)
-           - Checks if all output lines contain "COMPLETED"
-           - If sacct fails: assume job is completed
-           - If sacct succeeds but not all lines are COMPLETED: raise error
+        2. Fallback method: Execute `sacct -P --format=JobID,State,ExitCode
+           --noheader -j <jobid>`
+           - Used when job has left the active queue
+           - Parses pipe-delimited output to extract main job state
+           - Checks if main job is in a terminal state
+           - Returns the actual state (COMPLETED, FAILED, etc.)
 
         Returns:
             Dictionary containing job information or None if scontrol
             returned empty output (caller should retry).
 
         Raises:
-            RuntimeError: When sacct shows job is not fully completed.
+            RuntimeError: When job state cannot be determined or is
+                non-terminal.
             AirflowException: When scontrol fails after 3 empty responses.
         """
         try:
@@ -233,30 +235,59 @@ class SSHSlurmTrigger(BaseTrigger):
                 "scontrol returned %s with error %s.", exit_code, error
             )
             logger.warning("scontrol output", output)
-            try:
-                exit_code, stdout, stderr = await self._execute_ssh_command(
-                    ["sacct", "--noheader", "-j", self.jobid],
-                )
-                if exit_code != 0:
-                    logger.warning(stderr)
-                    raise RuntimeError(
-                        "sacct returned %s: %s", exit_code, stderr
-                    )
-                output = stdout.strip().splitlines()
-                is_completed = all("COMPLETED" in line for line in output)
-            except RuntimeError:
-                logger.warning(
-                    "Could not infer job state from running "
-                    "scontrol and sacct. Assuming completed."
-                )
-                is_completed = True
-            out = dict(**self.last_full_state)
-            if is_completed:
-                out["state"] = "COMPLETED"
-            else:
+
+            exit_code, stdout, stderr = await self._execute_ssh_command(
+                [
+                    "sacct",
+                    "-P",
+                    "--format=JobID,State,ExitCode",
+                    "--noheader",
+                    "-j",
+                    self.jobid,
+                ],
+            )
+
+            if exit_code != 0:
+                logger.warning("sacct returned %s: %s", exit_code, stderr)
                 raise RuntimeError(
                     f"Could not determine state of job {self.jobid}"
                 )
+
+            lines = stdout.strip().splitlines()
+            if not lines:
+                raise RuntimeError(
+                    f"Could not determine state of job {self.jobid}"
+                )
+
+            main_job_state = None
+            main_job_exit_code = None
+            for line in lines:
+                job_id, state, exit_code_str = line.split("|")
+
+                if job_id == self.jobid:
+                    main_job_state = state
+                    main_job_exit_code = exit_code_str
+                    break
+
+            if main_job_state is None:
+                raise RuntimeError(
+                    f"Could not determine state of job {self.jobid}"
+                )
+
+            if main_job_state not in TERMINAL_STATES:
+                raise RuntimeError(
+                    f"Could not determine state of job {self.jobid}"
+                )
+
+            if main_job_exit_code and main_job_exit_code != "0:0":
+                logger.warning(
+                    "Job %s has non-zero exit code: %s",
+                    self.jobid,
+                    main_job_exit_code,
+                )
+
+            out = dict(**self.last_full_state)
+            out["state"] = main_job_state
             return out
 
     async def parse_scontrol(
