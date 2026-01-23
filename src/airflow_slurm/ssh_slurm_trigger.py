@@ -27,6 +27,21 @@ from .ssh_utils import aget_ssh_connection_details
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+TERMINAL_STATES = {
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "NODE_FAIL",
+    "PREEMPTED",
+    "OUT_OF_MEMORY",
+    "BOOT_FAIL",
+    "DEADLINE",
+    "REVOKED",
+    "SUSPENDED",
+    "SPECIAL_EXIT",
+}
+
 
 def parse_scontrol_record(line):
     out = {}
@@ -154,10 +169,29 @@ class SSHSlurmTrigger(BaseTrigger):
                 )
 
     async def get_scontrol_output(self) -> dict | None:
-        """Get SLURM job status using scontrol command.
+        """Get SLURM job status using scontrol with sacct fallback.
+
+        Attempts to retrieve job status following this flow:
+
+        1. Primary method: Execute `scontrol show job <jobid>`
+           - If successful with output: parse and return job state
+           - If successful but empty output: return None to retry later
+             (allows up to 3 attempts tracked by self.scontrol_try)
+           - If fails or returns non-zero exit code: proceed to fallback
+
+        2. Fallback method: Execute `sacct --noheader -j <jobid>`
+           - Used when job has left the active queue (completed/failed)
+           - Checks if all output lines contain "COMPLETED"
+           - If sacct fails: assume job is completed
+           - If sacct succeeds but not all lines are COMPLETED: raise error
 
         Returns:
-            Dictionary containing job information or None if not found.
+            Dictionary containing job information or None if scontrol
+            returned empty output (caller should retry).
+
+        Raises:
+            RuntimeError: When sacct shows job is not fully completed.
+            AirflowException: When scontrol fails after 3 empty responses.
         """
         try:
             exit_code, output, error = await self._execute_ssh_command(
