@@ -89,7 +89,7 @@ class SSHSlurmTrigger(BaseTrigger):
         )
 
     async def _execute_ssh_command(
-        self, command: list[str] | str, timeout: int = 60
+        self, command: list[str] | str, timeout: int = 10
     ) -> tuple[int, str, str]:
         """Execute command via SSH using asyncssh.
 
@@ -102,9 +102,8 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         ssh_args = await aget_ssh_connection_details(self.ssh_conn_id)
 
-        # Build asyncssh connection parameters
         connect_kwargs = {
-            "known_hosts": None,  # Disable host key checking for automation
+            "known_hosts": None,
         }
 
         if ssh_args.key_file:
@@ -115,27 +114,44 @@ class SSHSlurmTrigger(BaseTrigger):
                 ssh_args.server_host_key_algs
             )
 
-        try:
-            async with asyncssh.connect(
-                ssh_args.host,
-                username=ssh_args.username,
-                port=ssh_args.port,
-                **connect_kwargs,
-            ) as conn:
-                if isinstance(command, list):
-                    command_str = " ".join(command)
+        command_str = (
+            " ".join(command) if isinstance(command, list) else command
+        )
+        max_retries = 5
+
+        for attempt in range(max_retries):
+            try:
+                async with asyncssh.connect(
+                    ssh_args.host,
+                    username=ssh_args.username,
+                    port=ssh_args.port,
+                    **connect_kwargs,
+                ) as conn:
+                    result = await conn.run(command_str, timeout=timeout)
+                    return result.exit_status, result.stdout, result.stderr
+
+            except asyncio.TimeoutError:
+                if attempt < max_retries - 1:
+                    delay = 2 ** (attempt + 1)
+                    logger.warning(
+                        "SSH command '%s' timed out after %d seconds. "
+                        "Retry %d/%d in %d seconds.",
+                        command_str,
+                        timeout,
+                        attempt + 1,
+                        max_retries - 1,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
                 else:
-                    command_str = command
-
-                result = await conn.run(command_str, timeout=timeout)
-                return result.exit_status, result.stdout, result.stderr
-
-        except asyncssh.Error as e:
-            raise AirflowException(f"SSH connection failed: {e}")
-        except asyncio.TimeoutError:
-            raise AirflowException(
-                f"SSH command timed out after {timeout} seconds"
-            )
+                    raise AirflowException(
+                        f"SSH command '{command_str}' timed out after "
+                        f"{timeout} seconds and {max_retries} retry attempts"
+                    )
+            except asyncssh.Error as e:
+                raise AirflowException(
+                    f"SSH connection failed for command '{command_str}': {e}"
+                )
 
     async def get_scontrol_output(self) -> dict | None:
         """Get SLURM job status using scontrol command.
@@ -143,9 +159,15 @@ class SSHSlurmTrigger(BaseTrigger):
         Returns:
             Dictionary containing job information or None if not found.
         """
-        exit_code, output, error = await self._execute_ssh_command(
-            ["scontrol", "--oneliner", "show", "job", self.jobid], timeout=30
-        )
+        try:
+            exit_code, output, error = await self._execute_ssh_command(
+                ["scontrol", "--oneliner", "show", "job", self.jobid]
+            )
+        except AirflowException as e:
+            logger.warning(
+                "scontrol command failed: %s. Attempting sacct fallback.", e
+            )
+            exit_code, output, error = -1, "", str(e)
 
         if exit_code == 0 and len(output) > 0:
             if not output:
@@ -179,7 +201,7 @@ class SSHSlurmTrigger(BaseTrigger):
             logger.warning("scontrol output", output)
             try:
                 exit_code, stdout, stderr = await self._execute_ssh_command(
-                    ["sacct", "--noheader", "-j", self.jobid], timeout=30
+                    ["sacct", "--noheader", "-j", self.jobid],
                 )
                 if exit_code != 0:
                     logger.warning(stderr)
@@ -253,7 +275,7 @@ class SSHSlurmTrigger(BaseTrigger):
 
         # NOTE: scancel accepts multiple job IDs as separate arguments
         exit_code, output, error = await self._execute_ssh_command(
-            ["scancel"] + list(ids), timeout=30
+            ["scancel"] + list(ids),
         )
 
         if exit_code != 0:
@@ -278,7 +300,7 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         try:
             exit_code, stdout, stderr = await self._execute_ssh_command(
-                ["cat", out_file], timeout=10
+                ["cat", out_file],
             )
 
             if exit_code != 0:
