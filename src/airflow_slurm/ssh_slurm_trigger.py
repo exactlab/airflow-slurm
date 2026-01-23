@@ -304,9 +304,24 @@ class SSHSlurmTrigger(BaseTrigger):
                     main_job_exit_code,
                 )
 
-            out = dict(**self.last_full_state)
-            out["state"] = main_job_state
-            return out
+            return {
+                "job_id": self.last_full_state.get(
+                    "JobId", self.last_full_state.get("job_id", self.jobid)
+                ),
+                "job_name": self.last_full_state.get(
+                    "JobName", self.last_full_state.get("job_name", "unknown")
+                ),
+                "state": main_job_state,
+                "reason": self.last_full_state.get(
+                    "Reason", self.last_full_state.get("reason", "unknown")
+                ),
+                "log_out": self.last_full_state.get(
+                    "StdOut", self.last_full_state.get("log_out", "/dev/null")
+                ),
+                "log_err": self.last_full_state.get(
+                    "StdErr", self.last_full_state.get("log_err", "/dev/null")
+                ),
+            }
 
     async def parse_scontrol(
         self, scontrol_output: Iterable[str], cancel_pending: bool = True
