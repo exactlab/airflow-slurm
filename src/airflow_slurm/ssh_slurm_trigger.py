@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
+class JobStateUnavailable(Exception):
+    """Raised when job state cannot be determined and retry is needed."""
+
+
+TERMINAL_STATES = {
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "NODE_FAIL",
+    "PREEMPTED",
+    "OUT_OF_MEMORY",
+    "BOOT_FAIL",
+    "DEADLINE",
+    "REVOKED",
+    "SUSPENDED",
+    "SPECIAL_EXIT",
+}
+
+
 def parse_scontrol_record(line):
     out = {}
     for kv in line.split():
@@ -153,11 +173,32 @@ class SSHSlurmTrigger(BaseTrigger):
                     f"SSH connection failed for command '{command_str}': {e}"
                 )
 
-    async def get_scontrol_output(self) -> dict | None:
-        """Get SLURM job status using scontrol command.
+    async def _get_job_status(self) -> dict | None:
+        """Get SLURM job status using scontrol with sacct fallback.
+
+        Attempts to retrieve job status following this flow:
+
+        1. Primary method: Execute `scontrol show job <jobid>`
+           - If successful with output: parse and return job state
+           - If successful but empty output: return None to retry later
+             (allows up to 3 attempts tracked by self.scontrol_try)
+           - If fails or returns non-zero exit code: proceed to fallback
+
+        2. Fallback method: Execute `sacct -P --format=JobID,State,ExitCode
+           --noheader -j <jobid>`
+           - Used when job has left the active queue
+           - Parses pipe-delimited output to extract main job state
+           - Checks if main job is in a terminal state
+           - Returns the actual state (COMPLETED, FAILED, etc.)
 
         Returns:
-            Dictionary containing job information or None if not found.
+            Dictionary containing job information or None if scontrol
+            returned empty output (caller should retry).
+
+        Raises:
+            RuntimeError: When job state cannot be determined or is
+                non-terminal.
+            AirflowException: When scontrol fails after 3 empty responses.
         """
         try:
             exit_code, output, error = await self._execute_ssh_command(
@@ -199,31 +240,88 @@ class SSHSlurmTrigger(BaseTrigger):
                 "scontrol returned %s with error %s.", exit_code, error
             )
             logger.warning("scontrol output", output)
-            try:
-                exit_code, stdout, stderr = await self._execute_ssh_command(
-                    ["sacct", "--noheader", "-j", self.jobid],
+
+            exit_code, stdout, stderr = await self._execute_ssh_command(
+                [
+                    "sacct",
+                    "-P",
+                    "--format=JobID,State,ExitCode",
+                    "--noheader",
+                    "-j",
+                    self.jobid,
+                ],
+            )
+
+            if exit_code != 0:
+                logger.warning("sacct returned %s: %s", exit_code, stderr)
+                raise JobStateUnavailable(
+                    f"sacct command failed for job {self.jobid}"
                 )
-                if exit_code != 0:
-                    logger.warning(stderr)
-                    raise RuntimeError(
-                        "sacct returned %s: %s", exit_code, stderr
-                    )
-                output = stdout.strip().splitlines()
-                is_completed = all("COMPLETED" in line for line in output)
-            except RuntimeError:
+
+            lines = stdout.strip().splitlines()
+            if not lines:
                 logger.warning(
-                    "Could not infer job state from running "
-                    "scontrol and sacct. Assuming completed."
+                    "sacct returned empty output for job %s", self.jobid
                 )
-                is_completed = True
-            out = dict(**self.last_full_state)
-            if is_completed:
-                out["state"] = "COMPLETED"
-            else:
-                raise RuntimeError(
-                    f"Could not determine state of job {self.jobid}"
+                raise JobStateUnavailable(
+                    f"sacct returned empty output for job {self.jobid}"
                 )
-            return out
+
+            main_job_state = None
+            main_job_exit_code = None
+            for line in lines:
+                job_id, state, exit_code_str = line.split("|")
+
+                if job_id == self.jobid:
+                    main_job_state = state
+                    main_job_exit_code = exit_code_str
+                    break
+
+            if main_job_state is None:
+                logger.warning(
+                    "Main job entry not found in sacct output for job %s",
+                    self.jobid,
+                )
+                raise JobStateUnavailable(
+                    f"Main job entry not found for job {self.jobid}"
+                )
+
+            if main_job_state not in TERMINAL_STATES:
+                logger.warning(
+                    "Job %s is in non-terminal state %s",
+                    self.jobid,
+                    main_job_state,
+                )
+                raise JobStateUnavailable(
+                    f"Job {self.jobid} is in non-terminal state "
+                    f"{main_job_state}"
+                )
+
+            if main_job_exit_code and main_job_exit_code != "0:0":
+                logger.warning(
+                    "Job %s has non-zero exit code: %s",
+                    self.jobid,
+                    main_job_exit_code,
+                )
+
+            return {
+                "job_id": self.last_full_state.get(
+                    "JobId", self.last_full_state.get("job_id", self.jobid)
+                ),
+                "job_name": self.last_full_state.get(
+                    "JobName", self.last_full_state.get("job_name", "unknown")
+                ),
+                "state": main_job_state,
+                "reason": self.last_full_state.get(
+                    "Reason", self.last_full_state.get("reason", "unknown")
+                ),
+                "log_out": self.last_full_state.get(
+                    "StdOut", self.last_full_state.get("log_out", "/dev/null")
+                ),
+                "log_err": self.last_full_state.get(
+                    "StdErr", self.last_full_state.get("log_err", "/dev/null")
+                ),
+            }
 
     async def parse_scontrol(
         self, scontrol_output: Iterable[str], cancel_pending: bool = True
@@ -334,6 +432,53 @@ class SSHSlurmTrigger(BaseTrigger):
 
         return to_return
 
+    async def get_job_status(
+        self, max_retries: int = 3, delay_base_s: int = 3
+    ) -> dict | None:
+        """Get SLURM job status with retry logic for race conditions.
+
+        Wraps _get_job_status() with exponential backoff retry logic to
+        handle race conditions when job state is temporarily unavailable.
+        Retries occur when the sacct command fails, returns empty output,
+        the main job entry is not found, or the job is in a non-terminal
+        state.
+
+        Args:
+            max_retries: Maximum number of retry attempts.
+            delay_base_s: Base for exponential backoff delay calculation
+                (delay = base ** (attempt + 1)).
+
+        Returns:
+            Dictionary containing job information or None if scontrol
+            returned empty output.
+
+        Raises:
+            RuntimeError: When job state cannot be determined after all
+                retries are exhausted.
+        """
+        for attempt in range(max_retries):
+            try:
+                slurm_job = await self._get_job_status()
+                return slurm_job
+            except JobStateUnavailable as e:
+                if attempt < max_retries - 1:
+                    delay = delay_base_s ** (attempt + 1)
+                    logger.warning(
+                        "Job state unavailable for job %s: %s. "
+                        "Retry %d/%d in %d seconds.",
+                        self.jobid,
+                        e,
+                        attempt + 1,
+                        max_retries - 1,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise RuntimeError(
+                        f"Could not determine state of job {self.jobid} "
+                        f"after {max_retries} attempts"
+                    )
+
     async def run(self):
         """The function that runs when we do a defer of the SlurmOperator."""
         # How many attempts do we have to read the job information and the log?
@@ -344,8 +489,7 @@ class SSHSlurmTrigger(BaseTrigger):
 
         while True:
             await asyncio.sleep(self.tdelta_between_pokes)
-
-            slurm_job = await self.get_scontrol_output()
+            slurm_job = await self.get_job_status()
             slurm_log = await self.get_log(slurm_job.get("log_out", None))
 
             self.log.debug(f"{slurm_job=} \n {slurm_log=}")
