@@ -16,6 +16,7 @@
 import asyncio
 import logging
 from collections import Counter
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
 import asyncssh
@@ -30,6 +31,29 @@ logger.setLevel(logging.DEBUG)
 
 class JobStateUnavailable(Exception):
     """Raised when job state cannot be determined and retry is needed."""
+
+
+@dataclass
+class JobState:
+    """Represents the state of a SLURM job."""
+
+    job_id: str
+    job_name: str
+    state: str
+    reason: str
+    log_out: str
+    log_err: str
+
+    def dict(self) -> dict[str, str]:
+        """Return serialisation-friendly dictionary representation."""
+        return {
+            "job_id": self.job_id,
+            "job_name": self.job_name,
+            "state": self.state,
+            "reason": self.reason,
+            "log_out": self.log_out,
+            "log_err": self.log_err,
+        }
 
 
 TERMINAL_STATES = {
@@ -78,14 +102,14 @@ class SSHSlurmTrigger(BaseTrigger):
         # FIXME:
         # Initialising with safe-ish values. This should be improved, e.g.,
         # by capturing the output of the job submission call.
-        self.last_full_state = {
-            "job_id": jobid,
-            "job_name": "unknown",
-            "state": "unknown",
-            "reason": "unknown",
-            "log_out": "/dev/null",
-            "log_err": "/dev/null",
-        }
+        self.last_full_state = JobState(
+            job_id=jobid,
+            job_name="unknown",
+            state="unknown",
+            reason="unknown",
+            log_out="/dev/null",
+            log_err="/dev/null",
+        )
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
@@ -173,7 +197,7 @@ class SSHSlurmTrigger(BaseTrigger):
                     f"SSH connection failed for command '{command_str}': {e}"
                 )
 
-    async def _get_job_status(self) -> dict | None:
+    async def _get_job_status(self) -> JobState | None:
         """Get SLURM job status using scontrol with sacct fallback.
 
         Attempts to retrieve job status following this flow:
@@ -192,8 +216,8 @@ class SSHSlurmTrigger(BaseTrigger):
            - Returns the actual state (COMPLETED, FAILED, etc.)
 
         Returns:
-            Dictionary containing job information or None if scontrol
-            returned empty output (caller should retry).
+            JobState instance containing job information or None if
+            scontrol returned empty output (caller should retry).
 
         Raises:
             RuntimeError: When job state cannot be determined or is
@@ -225,16 +249,15 @@ class SSHSlurmTrigger(BaseTrigger):
             )
 
             out = records[self.jobid.strip()]
-            out["JobState"] = array_status
-            self.last_full_state = out
-            return {
-                "job_id": out["JobId"],
-                "job_name": out["JobName"],
-                "state": out["JobState"],
-                "reason": out["Reason"],
-                "log_out": out["StdOut"],
-                "log_err": out["StdErr"],
-            }
+            self.last_full_state = JobState(
+                job_id=out["JobId"],
+                job_name=out["JobName"],
+                state=array_status,
+                reason=out["Reason"],
+                log_out=out["StdOut"],
+                log_err=out["StdErr"],
+            )
+            return self.last_full_state
         else:
             logger.warning(
                 "scontrol returned %s with error %s.", exit_code, error
@@ -304,24 +327,7 @@ class SSHSlurmTrigger(BaseTrigger):
                     main_job_exit_code,
                 )
 
-            return {
-                "job_id": self.last_full_state.get(
-                    "JobId", self.last_full_state.get("job_id", self.jobid)
-                ),
-                "job_name": self.last_full_state.get(
-                    "JobName", self.last_full_state.get("job_name", "unknown")
-                ),
-                "state": main_job_state,
-                "reason": self.last_full_state.get(
-                    "Reason", self.last_full_state.get("reason", "unknown")
-                ),
-                "log_out": self.last_full_state.get(
-                    "StdOut", self.last_full_state.get("log_out", "/dev/null")
-                ),
-                "log_err": self.last_full_state.get(
-                    "StdErr", self.last_full_state.get("log_err", "/dev/null")
-                ),
-            }
+            return replace(self.last_full_state, state=main_job_state)
 
     async def parse_scontrol(
         self, scontrol_output: Iterable[str], cancel_pending: bool = True
@@ -434,7 +440,7 @@ class SSHSlurmTrigger(BaseTrigger):
 
     async def get_job_status(
         self, max_retries: int = 3, delay_base_s: int = 3
-    ) -> dict | None:
+    ) -> JobState | None:
         """Get SLURM job status with retry logic for race conditions.
 
         Wraps _get_job_status() with exponential backoff retry logic to
@@ -449,8 +455,8 @@ class SSHSlurmTrigger(BaseTrigger):
                 (delay = base ** (attempt + 1)).
 
         Returns:
-            Dictionary containing job information or None if scontrol
-            returned empty output.
+            JobState instance containing job information or None if
+            scontrol returned empty output.
 
         Raises:
             RuntimeError: When job state cannot be determined after all
@@ -490,26 +496,20 @@ class SSHSlurmTrigger(BaseTrigger):
         while True:
             await asyncio.sleep(self.tdelta_between_pokes)
             slurm_job = await self.get_job_status()
-            slurm_log = await self.get_log(slurm_job.get("log_out", None))
+            slurm_log = await self.get_log(slurm_job.log_out)
 
             self.log.debug(f"{slurm_job=} \n {slurm_log=}")
 
             if slurm_job:
-                # In some cases we do not have the information in the scontrol instantly, we will try again from here
-                # self.tdelta_between_pokes seconds
-
-                slurm_changed_state = (
-                    slurm_job["state"] != self.last_known_state
-                )
-                self.last_known_state = slurm_job["state"]
+                slurm_changed_state = slurm_job.state != self.last_known_state
+                self.last_known_state = slurm_job.state
 
                 if slurm_log or slurm_changed_state:
-                    # We will only send a TriggerEvent when there is a state change or new lines in the log
                     break
 
         yield TriggerEvent(
             {
-                "slurm_job": slurm_job,
+                "slurm_job": slurm_job.dict(),
                 "slurm_changed_state": slurm_changed_state,
                 "log_number_lines": self.last_known_log_lines,
                 "log_new_lines": slurm_log,
