@@ -268,74 +268,58 @@ class SSHSlurmTrigger(BaseTrigger):
         else:
             return parsed
 
-    async def _get_job_status(self) -> JobState | None:
-        """Get SLURM job status using scontrol with sacct fallback.
-
-        Attempts to retrieve job status following this flow:
-
-        1. Primary method: Execute `scontrol show job <jobid>`
-           - If successful with output: parse and return job state
-           - If successful but empty output: return None to retry later
-             (allows up to 3 attempts tracked by self.scontrol_try)
-           - If fails or returns non-zero exit code: proceed to fallback
-
-        2. Fallback method: Execute `sacct -P --format=JobID,State,ExitCode
-           --noheader -j <jobid>`
-           - Used when job has left the active queue
-           - Parses pipe-delimited output to extract main job state
-           - Checks if main job is in a terminal state
-           - Returns the actual state (COMPLETED, FAILED, etc.)
+    async def _try_scontrol(self) -> JobState | None:
+        """Try to get job status from scontrol.
 
         Returns:
-            JobState instance containing job information or None if
-            scontrol returned empty output (caller should retry).
-
-        Raises:
-            RuntimeError: When job state cannot be determined or is
-                non-terminal.
-            AirflowException: When scontrol fails after 3 empty responses.
+            JobState with full metadata if successful, or None if job is not
+            in active queue.
         """
         try:
             exit_code, output, error = await self._execute_ssh_command(
                 ["scontrol", "--oneliner", "show", "job", self.jobid]
             )
         except AirflowException as e:
-            logger.warning(
-                "scontrol command failed: %s. Attempting sacct fallback.", e
-            )
-            exit_code, output, error = -1, "", str(e)
+            logger.warning("scontrol command failed: %s", e)
+            return None
 
-        if exit_code == 0 and len(output) > 0:
-            if not output:
+        if exit_code != 0 or not output:
+            if exit_code == 0 and not output:
                 if self.scontrol_try > 2:
                     raise AirflowException(
                         "scontrol didn't return any job information"
                     )
                 else:
                     self.scontrol_try += 1
-                    return
-
-            array_status, records = await self.parse_scontrol(
-                output.splitlines()
-            )
-
-            out = records[self.jobid.strip()]
-            self.last_full_state = JobState(
-                job_id=out["JobId"],
-                job_name=out["JobName"],
-                state=array_status,
-                reason=out["Reason"],
-                log_out=out["StdOut"],
-                log_err=out["StdErr"],
-                _is_default=False,
-            )
-            return self.last_full_state
-        else:
+                    return None
             logger.warning(
-                "scontrol returned %s with error %s.", exit_code, error
+                "scontrol returned %s with error %s", exit_code, error
             )
-            logger.warning("scontrol output", output)
+            return None
 
+        array_status, records = await self.parse_scontrol(output.splitlines())
+        out = records[self.jobid.strip()]
+        self.last_full_state = JobState(
+            job_id=out["JobId"],
+            job_name=out["JobName"],
+            state=array_status,
+            reason=out["Reason"],
+            log_out=out["StdOut"],
+            log_err=out["StdErr"],
+            _is_default=False,
+        )
+        return self.last_full_state
+
+    async def _try_sacct(self) -> JobState | None:
+        """Try to get job status from sacct.
+
+        Returns:
+            JobState with updated state if successful.
+
+        Raises:
+            JobStateUnavailable: When sacct fails or returns invalid data.
+        """
+        try:
             exit_code, stdout, stderr = await self._execute_ssh_command(
                 [
                     "sacct",
@@ -346,60 +330,109 @@ class SSHSlurmTrigger(BaseTrigger):
                     self.jobid,
                 ],
             )
+        except AirflowException as e:
+            logger.warning("sacct command failed: %s", e)
+            raise JobStateUnavailable(
+                f"sacct command failed for job {self.jobid}"
+            ) from e
 
-            if exit_code != 0:
-                logger.warning("sacct returned %s: %s", exit_code, stderr)
-                raise JobStateUnavailable(
-                    f"sacct command failed for job {self.jobid}"
-                )
+        if exit_code != 0:
+            logger.warning("sacct returned %s: %s", exit_code, stderr)
+            raise JobStateUnavailable(
+                f"sacct command failed for job {self.jobid}"
+            )
 
-            lines = stdout.strip().splitlines()
-            if not lines:
-                logger.warning(
-                    "sacct returned empty output for job %s", self.jobid
-                )
-                raise JobStateUnavailable(
-                    f"sacct returned empty output for job {self.jobid}"
-                )
+        lines = stdout.strip().splitlines()
+        if not lines:
+            logger.warning(
+                "sacct returned empty output for job %s", self.jobid
+            )
+            raise JobStateUnavailable(
+                f"sacct returned empty output for job {self.jobid}"
+            )
 
-            main_job_state = None
-            main_job_exit_code = None
-            for line in lines:
-                job_id, state, exit_code_str = line.split("|")
+        main_job_state = None
+        main_job_exit_code = None
+        for line in lines:
+            job_id, state, exit_code_str = line.split("|")
 
-                if job_id == self.jobid:
-                    main_job_state = state
-                    main_job_exit_code = exit_code_str
-                    break
+            if job_id == self.jobid:
+                main_job_state = state
+                main_job_exit_code = exit_code_str
+                break
 
-            if main_job_state is None:
-                logger.warning(
-                    "Main job entry not found in sacct output for job %s",
-                    self.jobid,
-                )
-                raise JobStateUnavailable(
-                    f"Main job entry not found for job {self.jobid}"
-                )
+        if main_job_state is None:
+            logger.warning(
+                "Main job entry not found in sacct output for job %s",
+                self.jobid,
+            )
+            raise JobStateUnavailable(
+                f"Main job entry not found for job {self.jobid}"
+            )
 
-            if main_job_state not in TERMINAL_STATES:
-                logger.warning(
-                    "Job %s is in non-terminal state %s",
-                    self.jobid,
-                    main_job_state,
-                )
-                raise JobStateUnavailable(
-                    f"Job {self.jobid} is in non-terminal state "
-                    f"{main_job_state}"
-                )
+        if main_job_state not in TERMINAL_STATES:
+            logger.warning(
+                "Job %s is in non-terminal state %s",
+                self.jobid,
+                main_job_state,
+            )
+            raise JobStateUnavailable(
+                f"Job {self.jobid} is in non-terminal state {main_job_state}"
+            )
 
-            if main_job_exit_code and main_job_exit_code != "0:0":
-                logger.warning(
-                    "Job %s has non-zero exit code: %s",
-                    self.jobid,
-                    main_job_exit_code,
-                )
+        if main_job_exit_code and main_job_exit_code != "0:0":
+            logger.warning(
+                "Job %s has non-zero exit code: %s",
+                self.jobid,
+                main_job_exit_code,
+            )
 
-            return replace(self.last_full_state, state=main_job_state)
+        return replace(self.last_full_state, state=main_job_state)
+
+    async def _get_job_status(self) -> JobState | None:
+        """Get SLURM job status with adaptive fallback sequence.
+
+        Uses an adaptive fallback sequence based on metadata availability:
+        - When full metadata is available (_is_default=False): tries squeue,
+          then scontrol, then sacct
+        - When metadata is unavailable (_is_default=True): tries scontrol,
+          then squeue, then sacct
+
+        This ensures full metadata is obtained on cold start whilst
+        optimising for reliability during the polling phase.
+
+        Returns:
+            JobState instance containing job information or None if
+            scontrol returned empty output (caller should retry).
+
+        Raises:
+            JobStateUnavailable: When all methods fail to retrieve status.
+        """
+        has_metadata = (
+            self.last_full_state is not None
+            and not self.last_full_state._is_default
+        )
+
+        if has_metadata:
+            result = await self._try_squeue()
+            if result is not None:
+                return result
+
+            result = await self._try_scontrol()
+            if result is not None:
+                return result
+
+            return await self._try_sacct()
+        else:
+            result = await self._try_scontrol()
+            if result is not None:
+                return result
+
+            result = await self._try_squeue()
+            if result is not None:
+                return result
+
+            return await self._try_sacct()
 
     async def parse_scontrol(
         self, scontrol_output: Iterable[str], cancel_pending: bool = True
