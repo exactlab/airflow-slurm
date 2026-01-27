@@ -35,14 +35,20 @@ class JobStateUnavailable(Exception):
 
 @dataclass
 class JobState:
-    """Represents the state of a SLURM job."""
+    """Represents the state of a SLURM job.
 
-    job_id: str
-    job_name: str
-    state: str
-    reason: str
-    log_out: str
-    log_err: str
+    The _is_default attribute tracks whether full metadata has been obtained
+    from scontrol. When True, only partial metadata is available (e.g., from
+    squeue), and the trigger should prefer sources that provide full metadata.
+    """
+
+    job_id: str = "unknown"
+    job_name: str = "unknown"
+    state: str = "unknown"
+    reason: str = "unknown"
+    log_out: str = "/dev/null"
+    log_err: str = "/dev/null"
+    _is_default: bool = True
 
     def dict(self) -> dict[str, str]:
         """Return serialisation-friendly dictionary representation."""
@@ -197,6 +203,71 @@ class SSHSlurmTrigger(BaseTrigger):
                     f"SSH connection failed for command '{command_str}': {e}"
                 )
 
+    def _parse_squeue_output(self, output: str) -> JobState | None:
+        """Parse squeue output and return minimal JobState.
+
+        Args:
+            output: Output from `squeue -j <jobid> -o "%i|%T"` which
+                produces pipe-delimited format: JobID|State
+
+        Returns:
+            JobState with only job_id and state populated, or None if
+            output is empty or unparseable.
+        """
+        output = output.strip()
+        if not output:
+            return None
+
+        try:
+            job_id, state = output.split("|")
+            return JobState(
+                job_id=job_id.strip(),
+                state=state.strip(),
+                _is_default=True,
+            )
+        except ValueError:
+            logger.warning("Failed to parse squeue output: %s", output)
+            return None
+
+    async def _try_squeue(self) -> JobState | None:
+        """Try to get job state from squeue, merging with cached metadata.
+
+        Executes `squeue -j <jobid> -o "%i|%T"` and merges the result with
+        cached metadata from `last_full_state`. This is useful for checking
+        job state when the SLURM database is unavailable but the scheduler
+        is still responsive.
+
+        Returns:
+            JobState with updated state merged with cached metadata, or None
+            if squeue fails or returns no data.
+        """
+        try:
+            exit_code, stdout, stderr = await self._execute_ssh_command(
+                ["squeue", "-j", self.jobid, "-o", "%i|%T"],
+                timeout=5,
+            )
+        except AirflowException as e:
+            logger.warning("squeue command failed: %s", e)
+            return None
+
+        if exit_code != 0:
+            logger.warning(
+                "squeue returned exit code %s: %s", exit_code, stderr
+            )
+            return None
+
+        parsed = self._parse_squeue_output(stdout)
+        if parsed is None:
+            return None
+
+        if self.last_full_state is not None:
+            return replace(
+                self.last_full_state,
+                state=parsed.state,
+            )
+        else:
+            return parsed
+
     async def _get_job_status(self) -> JobState | None:
         """Get SLURM job status using scontrol with sacct fallback.
 
@@ -256,6 +327,7 @@ class SSHSlurmTrigger(BaseTrigger):
                 reason=out["Reason"],
                 log_out=out["StdOut"],
                 log_err=out["StdErr"],
+                _is_default=False,
             )
             return self.last_full_state
         else:
