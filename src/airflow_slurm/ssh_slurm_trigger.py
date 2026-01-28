@@ -37,9 +37,9 @@ class JobStateUnavailable(Exception):
 class JobState:
     """Represents the state of a SLURM job.
 
-    The _is_default attribute tracks whether full metadata has been obtained
-    from scontrol. When True, only partial metadata is available (e.g., from
-    squeue), and the trigger should prefer sources that provide full metadata.
+    The _has_full_metadata attribute tracks whether full metadata has been
+    obtained from scontrol. When True, all job details are available. When
+    False, only partial metadata is available (e.g., from squeue).
     """
 
     job_id: str = "unknown"
@@ -48,7 +48,7 @@ class JobState:
     reason: str = "unknown"
     log_out: str = "/dev/null"
     log_err: str = "/dev/null"
-    _is_default: bool = True
+    _has_full_metadata: bool = False
 
     def dict(self) -> dict[str, str]:
         """Return serialisation-friendly dictionary representation."""
@@ -223,7 +223,7 @@ class SSHSlurmTrigger(BaseTrigger):
             return JobState(
                 job_id=job_id.strip(),
                 state=state.strip(),
-                _is_default=True,
+                _has_full_metadata=False,
             )
         except ValueError:
             logger.warning("Failed to parse squeue output: %s", output)
@@ -244,7 +244,6 @@ class SSHSlurmTrigger(BaseTrigger):
         try:
             exit_code, stdout, stderr = await self._execute_ssh_command(
                 ["squeue", "-j", self.jobid, "-o", "%i|%T"],
-                timeout=5,
             )
         except AirflowException as e:
             logger.warning("squeue command failed: %s", e)
@@ -306,7 +305,7 @@ class SSHSlurmTrigger(BaseTrigger):
             reason=out["Reason"],
             log_out=out["StdOut"],
             log_err=out["StdErr"],
-            _is_default=False,
+            _has_full_metadata=True,
         )
         return self.last_full_state
 
@@ -339,7 +338,7 @@ class SSHSlurmTrigger(BaseTrigger):
         if exit_code != 0:
             logger.warning("sacct returned %s: %s", exit_code, stderr)
             raise JobStateUnavailable(
-                f"sacct command failed for job {self.jobid}"
+                f"sacct command failed for job {self.jobid}: {stderr}"
             )
 
         lines = stdout.strip().splitlines()
@@ -393,10 +392,10 @@ class SSHSlurmTrigger(BaseTrigger):
         """Get SLURM job status with adaptive fallback sequence.
 
         Uses an adaptive fallback sequence based on metadata availability:
-        - When full metadata is available (_is_default=False): tries squeue,
-          then scontrol, then sacct
-        - When metadata is unavailable (_is_default=True): tries scontrol,
-          then squeue, then sacct
+        - When full metadata is available (_has_full_metadata=True): tries
+          squeue, then scontrol, then sacct
+        - When metadata is unavailable (_has_full_metadata=False): tries
+          scontrol, then squeue, then sacct
 
         This ensures full metadata is obtained on cold start whilst
         optimising for reliability during the polling phase.
@@ -410,7 +409,7 @@ class SSHSlurmTrigger(BaseTrigger):
         """
         has_metadata = (
             self.last_full_state is not None
-            and not self.last_full_state._is_default
+            and self.last_full_state._has_full_metadata
         )
 
         if has_metadata:
