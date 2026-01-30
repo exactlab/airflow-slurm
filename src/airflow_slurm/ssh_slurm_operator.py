@@ -163,6 +163,7 @@ class SSHSlurmOperator(BaseOperator):
         Returns:
             Rendered SLURM script as a string.
         """
+        # Mangle job name with a unique identifier
         job_uid = str(uuid.uuid4())[:8]
         self.slurm_options["JOB_NAME"] = (
             f"{self.slurm_options.get('JOB_NAME', 'airflow_slurm_job')}_{job_uid}"
