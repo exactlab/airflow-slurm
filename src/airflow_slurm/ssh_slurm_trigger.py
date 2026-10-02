@@ -80,9 +80,13 @@ TERMINAL_STATES = {
 
 def parse_scontrol_record(line):
     out = {}
-    for kv in line.split():
-        k, v = kv.split("=", maxsplit=1)
-        out[k] = v
+    for token in line.split():
+        if "=" in token:
+            key, value = token.split("=", maxsplit=1)
+            out[key] = value
+        else:
+            # Values such as SubmitLine contain spaces.
+            out[key] += f" {token}"
     return out
 
 
@@ -304,7 +308,7 @@ class SSHSlurmTrigger(BaseTrigger):
             state=array_status,
             reason=out["Reason"],
             log_out=out["StdOut"],
-            log_err=out["StdErr"],
+            log_err=out["StdErr"] or out["StdOut"],
             _has_full_metadata=True,
         )
         return self.last_full_state
