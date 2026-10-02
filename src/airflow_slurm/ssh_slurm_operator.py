@@ -14,6 +14,7 @@
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
 import subprocess  # nosec
+import uuid
 from typing import Any, Sequence
 
 from airflow.exceptions import AirflowException, AirflowSkipException
@@ -162,13 +163,10 @@ class SSHSlurmOperator(BaseOperator):
         Returns:
             Rendered SLURM script as a string.
         """
-        # Mangle job name with submission date
-        logical_date = context.get("logical_date") or context.get(
-            "execution_date"
-        )
-        job_date = logical_date.strftime("%Y%m%dT%H%M")
+        # Mangle job name with a unique identifier
+        job_uid = str(uuid.uuid4())[:8]
         self.slurm_options["JOB_NAME"] = (
-            f"{self.slurm_options.get('JOB_NAME', 'airflow_slurm_job')}_{job_date}"
+            f"{self.slurm_options.get('JOB_NAME', 'airflow_slurm_job')}_{job_uid}"
         )
 
         # Process slurm options
