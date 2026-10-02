@@ -1,6 +1,6 @@
 [project]
 name = "airflow-slurm"
-version = "0.2.5"
+version = "0.2.6"
 description = "Airflow operator for slurm"
 readme = "README.md"
 include = ["src/airflow_slurm/py.typed"]
